@@ -4,7 +4,9 @@
 
   * **申报要素 Excel**（可 UNC / 长路径）—— 必填；
   * **图片根目录**（推荐直接选到票号目录）—— 必填；
-  * **票号**（**只读展示**自动 / 推断结果；失败时由 ``main_window`` 兜底弹框手填，Q2）。
+  * **票号**（**只读展示**自动 / 推断结果；右侧附「**改**」纠正入口 —— P2-2：
+    目录推断可能误把纯数字目录名当票号，用户需有可逆的纠正通道；失败时由
+    ``main_window`` 兜底弹框手填，Q2）。
 
 ⚠️ **v0.2.0 点 2 —— 控件精简**：``QGridLayout`` 由 5 行减为 **2 行（+1 行票号只读展示）**：
 「成果产出目录」「过程产出目录」两行**整行移除**，改由运行目录约定自动就位
@@ -36,6 +38,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QPushButton,
@@ -153,18 +156,27 @@ class DataSourcePanel(QFrame):
         grid.addWidget(self.share_edit, 1, 1)
         grid.addWidget(self.share_btn, 1, 2)
 
-        # ── 第 2 行：票号（只读展示；失败时由 main_window 兜底弹框手填，Q2）──
+        # ── 第 2 行：票号（只读展示 + 「改」纠正入口；失败时由 main_window 兜底弹框手填，Q2）──
         self.ticket_edit = QLineEdit(self)
         self.ticket_edit.setPlaceholderText("预检识别 / 目录推断的票号（识别失败会提示手填）")
         self.ticket_edit.setToolTip("出货通知书号（只读；自动识别失败时由程序兜底获取）")
         self.ticket_edit.setReadOnly(True)
         self.ticket_edit.setFrame(False)
         self.ticket_edit.setObjectName("readonlyField")
+        # P2-2：目录推断可能误把纯数字目录名（如 20260902）当票号 → 提供轻量纠正入口，
+        # 避免「推断错 → 用户没注意 → 静默跑错票」。改完刷新标签，后续「预检」仍会
+        # 重新识别并覆盖（不做不可逆写死）。
+        self.ticket_edit_btn = QPushButton("改", self)
+        self.ticket_edit_btn.setObjectName("ticketEditButton")
+        self.ticket_edit_btn.setToolTip("手动修改票号（目录推断可能误判为纯数字目录名）")
+        self.ticket_edit_btn.setMaximumWidth(40)
+        self.ticket_edit_btn.clicked.connect(self._on_edit_ticket)
         self.probe_btn = QPushButton("预检 / 探测断点", self)
         self.probe_btn.clicked.connect(self.probe_clicked.emit)
         grid.addWidget(self._label("票号"), 2, 0)
         grid.addWidget(self.ticket_edit, 2, 1)
-        grid.addWidget(self.probe_btn, 2, 2)
+        grid.addWidget(self.ticket_edit_btn, 2, 2)
+        grid.addWidget(self.probe_btn, 2, 3)
 
         # 注：v0.2.0 起「成果产出目录」「过程产出目录」两行**整行移除** —— 输出目录
         # 改由运行目录约定（app_base_dir()/报关申报要素校验/{result,logs}）自动就位。
@@ -361,6 +373,7 @@ class DataSourcePanel(QFrame):
             self.share_edit,
             self.share_btn,
             self.probe_btn,
+            self.ticket_edit_btn,
         ):
             widget.setEnabled(not locked)
 
@@ -416,3 +429,24 @@ class DataSourcePanel(QFrame):
         """写回票号（自动识别 / 目录推断 / 兜底手填的结果）。"""
         if ticket:
             self.ticket_edit.setText(ticket)
+
+    def _on_edit_ticket(self) -> None:
+        """「改」纠正入口（P2-2）：弹输入框手动修改票号。
+
+        背景：票号现为**只读标签**，初始值来自「图片根目录末段推断」；若误选目录层级，
+        推断值可能是纯数字目录名（如 ``20260902``），用户此前看不到纠正通道。
+        此处提供轻量纠正入口：改完刷新标签并发 ``inputs_changed``（回写配置）；后续
+        「预检」仍会重新识别并覆盖，故纠正是**可逆**的。
+        """
+        current = self.ticket_edit.text().strip()
+        text, ok = QInputDialog.getText(
+            self,
+            "修改票号",
+            "请输入正确的出货通知书号（票号）。\n"
+            "提示：留空或取消不会改动；「预检」仍会重新识别并覆盖此值。",
+            QLineEdit.EchoMode.Normal,
+            current,
+        )
+        if ok and text and text.strip():
+            self.set_ticket_no(text.strip())
+            self.inputs_changed.emit()

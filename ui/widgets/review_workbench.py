@@ -237,11 +237,16 @@ class ReviewWorkbench(QFrame):
                 "🔵 缺图：证据目录不存在或文件缺失。\n请「标记待补图」并填写备注。"
             )
             return
-        self.image_viewer.load(str(getattr(first_exists, "image_path", "")))
+        # 点 9.2：卡片默认展示「第一条存在图」；切换查看器图片时同步卡片当前图
+        first_path = str(getattr(first_exists, "image_path", ""))
+        self.card.set_current_image(first_path)
+        self.image_viewer.load(first_path)
 
     def _on_evidence_selected(self, path: str) -> None:
-        """点击图号按钮 → 切换左侧查看器。"""
+        """点击图号按钮 → 切换左侧查看器 + 同步右侧卡片当前图（点 9.2）。"""
         if path:
+            # 右侧证据卡只展示「当前选中图」的 OCR（修复原「整条拼接」缺陷）
+            self.card.set_current_image(path)
             self.image_viewer.load(path)
 
     def _on_verdict_changed(self, key: str, verdict: str, note: str, mark_missing: bool) -> None:
