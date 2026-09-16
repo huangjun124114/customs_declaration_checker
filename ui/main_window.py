@@ -51,7 +51,9 @@ from ui.widgets.summary_panel import SummaryPanel
 __all__ = ["MainWindow"]
 
 APP_TITLE = "报关申报要素自动校验工具"
-APP_VERSION = "0.2.0"
+#: ⚠️ 与 ``main.py::APP_VERSION`` 必须同步（ui 层不 import 入口模块，故此处独立定义；
+#: v0.3.0 曾漏更，留下 0.2.0 的陈旧值 —— 改版本号时两处一起改）
+APP_VERSION = "0.3.1"
 
 #: 「人工复核工作台」页签索引（v0.2.0 点 4：初始隐藏，跑完 / 有结果后显示）
 _WORKBENCH_TAB_INDEX = 1

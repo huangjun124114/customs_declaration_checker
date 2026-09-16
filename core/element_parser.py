@@ -18,6 +18,19 @@
 **契约（架构设计 4 节接口表）**：:meth:`ElementParser.parse` **永不抛异常**，
 最坏返回空 ``brand`` / ``model``，由 ``JudgeEngine`` 判定"缺图内标识"。
 
+**判定范围（口径 v0.3.1，用户裁定 2026-09-16）**：申报要素原文虽含多个要素
+（``用途`` / ``结构类型`` / ``品牌`` / ``型号`` / ``额定电压`` / ``长度`` …），
+但本解析器**只识别「品牌」「型号」两个要素**（见 :data:`core.constants.JUDGED_FIELDS`），
+其余要素**一律不参与** —— 既不产生候选，也不影响 ``brand`` / ``model`` 的取值。
+具体保证：
+
+  * 品牌/型号**字段键**经 :meth:`ElementParser._is_brand_key` /
+    :meth:`ElementParser._is_model_key` 收窄，非值类要素字段
+    （``品牌类型`` / ``型号类型`` …，见 :data:`core.constants.NON_VALUE_FIELD_SUFFIXES`）
+    被显式排除；
+  * ``parse()`` 返回的 :class:`core.models.ParsedElement` **只有** ``brand`` /
+    ``model`` 两个识别结果（``fields`` 仅保留原始 ``(键, 值)`` 对供追溯，不参与判定）。
+
 依赖：``core.models`` / ``core.constants`` / ``core.rule_repository`` / ``infra.*``
 （**不依赖 PySide6**）。
 """
@@ -467,8 +480,12 @@ class ElementParser:
                 candidates.append((value, f"{key}:{value}"))
 
         # 无显式品牌字段时，把含"品牌"字样的段落也纳入候选
+        # ⚠️ 但**必须**排除「品牌类型」这类非值类要素字段（口径 v0.3.1：
+        #    只有「品牌」「型号」参与识别与判定，其他要素一律不参与）
         if not candidates:
             for key, value in pairs:
+                if self._is_non_value_key(key):
+                    continue
                 if "品牌" in key or "品牌" in value:
                     candidates.append((value, f"{key}:{value}"))
 
@@ -514,14 +531,17 @@ class ElementParser:
                     return cleaned
 
         # ② 键含「型号」但键本身带前缀（如「规格型号」「产品型号」）
+        #    ⚠️ 排除「型号类型」这类非值类要素字段（口径 v0.3.1）
         for key, value in pairs:
-            if "型号" in key:
+            if "型号" in key and not self._is_non_value_key(key):
                 cleaned = self._extract_model_from_value(value)
                 if cleaned:
                     return cleaned
 
         # ③ 值以「型号」开头但无键（如 `无型号` 段落）
-        for _key, value in pairs:
+        for key, value in pairs:
+            if self._is_non_value_key(key):
+                continue
             if "型号" in value and _INTERNAL_COLON not in value:
                 cleaned = self._extract_model_from_value(value)
                 if cleaned:
@@ -597,9 +617,37 @@ class ElementParser:
 
     # ─────────────────── 内部辅助 ───────────────────
 
+    def _is_non_value_key(self, key: str) -> bool:
+        """判断字段键是否为**非「值」类要素字段**（``品牌类型`` / ``型号类型`` …）。
+
+        **口径（v0.3.1，用户裁定）**：申报要素中**只有「品牌」「型号」参与识别与判定**，
+        其他要素一律不参与。``品牌类型`` 这类字段的取值是**品牌的归类**
+        （如报关要素 ``0:品牌类型`` 取值为 0/1/2/3/4），**不是品牌本身**；
+        不加排除时 ``品牌类型:0`` 会被读成品牌值 ``0``（实测样本含该要素形态）。
+
+        Args:
+            key: 字段键。
+
+        Returns:
+            ``True`` 表示该键属于"非值类"要素字段，不得作为品牌/型号字段。
+        """
+        norm = re.sub(r"\s+", "", key or "")
+        if not norm:
+            return False
+        return any(
+            norm.endswith(suffix) for suffix in C.NON_VALUE_FIELD_SUFFIXES if suffix
+        )
+
     def _is_brand_key(self, key: str) -> bool:
-        """判断字段键是否为品牌字段。"""
+        """判断字段键是否为品牌字段。
+
+        口径（v0.3.1）：``品牌`` / ``BRAND`` 精确匹配，或以 ``品牌`` 开头/结尾
+        （``申报品牌`` / ``宇同品牌`` 等无冒号形态）；**排除** ``品牌类型`` 这类
+        非值类要素字段（见 :meth:`_is_non_value_key`）。
+        """
         norm = re.sub(r"\s+", "", key or "").upper()
+        if not norm or self._is_non_value_key(norm):
+            return False
         return norm in {"品牌", "BRAND"} or norm.endswith("品牌") or norm.startswith("品牌")
 
     def _is_model_key(self, key: str) -> bool:
@@ -607,7 +655,7 @@ class ElementParser:
 
         必须精确匹配：``型号`` / ``规格型号`` / ``产品型号`` / ``Model`` …
         **不得**用 ``in key``（否则「无型号」会被误判为型号字段，
-        进而把后续值当作型号）。
+        进而把后续值当作型号）；**排除** ``型号类型`` 这类非值类要素字段。
 
         Args:
             key: 字段键。
@@ -616,7 +664,7 @@ class ElementParser:
             ``True`` 表示该键是型号字段名。
         """
         norm = re.sub(r"\s+", "", key or "").upper()
-        if not norm:
+        if not norm or self._is_non_value_key(norm):
             return False
         for name in self._model_field_names:
             target = re.sub(r"\s+", "", str(name)).upper()

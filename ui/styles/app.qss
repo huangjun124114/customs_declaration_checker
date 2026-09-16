@@ -130,3 +130,26 @@ QLabel#imageStage {
 QLabel#reviewHint {
     color: #909399;
 }
+
+/* ── 复核卡滚动容器（v0.3.1）──
+ * 卡片内容（尤其「散行 OCR」行数不定）超过窗格高时改为滚动，
+ * 避免 QVBoxLayout 把子控件压到最小尺寸以下而互相重叠。
+ */
+QScrollArea#cardScroll {
+    background: transparent;
+    border: none;
+}
+QWidget#cardScrollContent {
+    background: transparent;
+}
+
+/* ── 复核卡底部操作区（v0.3.1）──
+ * 「重判为 / 备注 / 标记待补图 / 保存重判」常驻在滚动区**之外**：
+ * 内容是散行 OCR（行数不定），一旦超高就把按钮推到折叠线以下，
+ * 必须先滚动才够得着 —— 故操作区固定、内容区滚动。
+ */
+QFrame#cardFooter {
+    background: #FFFFFF;
+    border: none;
+    border-top: 1px solid #E4E7ED;
+}

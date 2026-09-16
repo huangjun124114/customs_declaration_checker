@@ -4,14 +4,14 @@
 「当前图 OCR 文本」两个控件，**内容重复**。v0.3.0 只保留一个入口
 （按钮「查看原始 OCR 文本」），点击后用**弹窗**展示。
 
-**关键约束（需求 8 原文）**：**弹窗不要遮挡图片区域**。实现要点：
+**关键约束**：① **不遮挡图片区域**；② 定位在**主窗口右侧、垂直居中**（**不置顶**）。
+实现要点：
 
   * **非模态** + ``Qt.WindowType.Tool`` —— 不阻塞主界面，用户可边看图边对照文本；
   * **单例**（由调用方 :class:`ui.widgets.workbench_card.WorkbenchCard` 持有一个实例）
     —— 重复点击只置顶，不叠加窗口；
-  * **默认定位在主窗口右侧外**（``x = 主窗口右边界 + 8``）；右侧空间不足时回退到
-    **屏幕右缘**并尽量贴着图片区右侧外放置，绝**不覆盖**图片区（见
-    :meth:`OcrTextDialog.show_beside`）；
+  * **右区自适应**：以「图片区右边界 → 主窗口右边界」为合法右区，弹窗**按需收窄**
+    后**右对齐**，并**垂直居中于主窗口**（见 :meth:`OcrTextDialog.show_beside`）；
   * 提供 ``◀ 上一张`` / ``下一张 ▶``，可不关弹窗连续翻阅本记录所有图的 OCR；
   * 提供「复制全文」。
 
@@ -38,7 +38,10 @@ __all__ = ["OcrTextDialog"]
 #: 弹窗默认尺寸
 _DEFAULT_WIDTH = 560
 _DEFAULT_HEIGHT = 460
-#: 与主窗口 / 图片区的横向间距
+#: 弹窗最小可用尺寸（再小就没法读文本）
+_MIN_WIDTH = 360
+_MIN_HEIGHT = 240
+#: 与主窗口 / 图片区的间距
 _GAP = 8
 
 
@@ -139,20 +142,23 @@ class OcrTextDialog(QDialog):
         main_window: QWidget | None = None,
         avoid: QWidget | None = None,
     ) -> None:
-        """**不遮挡图片区**地显示（需求 8 关键约束）。
+        """在**主窗口右侧、垂直居中**显示（需求 8 + 现场反馈修正）。
 
-        按**候选位优先级**择一，先满足「不与 ``avoid`` 重叠」，再尽量落在屏内：
+        **定位规则（v0.3.1）**：
 
-          1. **主窗口右侧外**（``x = 主窗口.right() + 8``）—— 首选，图片区在窗口内
-             时必然不遮；
-          2. **图片区右侧外**（``x = 图片区.right() + 8``）；
-          3. **图片区下方**（``y = 图片区.bottom() + 8``）；
-          4. 主窗口下方；
-          5. 屏幕左上角兜底。
+          1. 「右侧页面」= **图片区右边界 → 主窗口右边界**，并收敛进屏幕可用区；
+          2. 宽度 = ``clamp(默认宽, 右侧可用宽度)``（下限 :data:`_MIN_WIDTH`）——
+             即**按需收窄**而不是溢出屏幕，从而同时满足「在右侧」与「不遮图」；
+          3. ``x`` **右对齐**（贴右侧边界），``y`` = 主窗口**垂直中心** → 弹窗垂直居中，
+             **不再置顶**；
+          4. 若右侧放不下（小屏 / 图片区几乎占满窗口）→ **退化为贴图片区下方**，
+             优先保住「不遮图」；连下方也无空间时，才贴右侧并允许压住图片区
+             （此时屏幕上不存在"既在右侧又不遮图"的合法位置）。
 
-        **优先级说明**：当「不遮图」与「完整落在屏内」冲突时，**前者优先**——
-        弹窗宁可溢出屏幕边缘，也不覆盖图片区（用户的核心诉求是边看图边对照）。
-        极端情况下（图片区占满屏幕）会压缩弹窗高度贴到图片区下方。
+        ⚠️ **改动原因（实测反馈）**：旧实现把候选位依次试「主窗口右侧外 → 图片区右侧外 →
+        图片区下方 → 屏幕左上角」，且要求候选位**完整落在屏内**才采纳 ——
+        主窗口**最大化**时"右侧外"必然出屏，逐级退化后最终落到**屏幕左上角 (8,8)**，
+        既置顶又压住图片区。现改为**先算合法右区、再右对齐垂直居中**，不做盲试。
 
         Args:
             main_window: 主窗口；``None`` 时取本弹窗的顶层窗口。
@@ -166,59 +172,94 @@ class OcrTextDialog(QDialog):
         ) or QGuiApplication.primaryScreen()
         area = screen.availableGeometry()
 
-        width = max(self.width(), _DEFAULT_WIDTH)
-        height = max(self.height(), _DEFAULT_HEIGHT)
         anchor = avoid.geometry() if avoid is not None else None
-        win_geo = window.geometry() if window is not None else None
+        win_geo = window.frameGeometry() if window is not None else None
 
-        candidates: list[tuple[int, int]] = []
-        if win_geo is not None:
-            candidates.append((win_geo.right() + _GAP, win_geo.top() + 120))
-        if anchor is not None:
-            candidates.append((anchor.right() + _GAP, anchor.top()))
-            candidates.append((anchor.left(), anchor.bottom() + _GAP))
-        if win_geo is not None:
-            candidates.append((win_geo.left() + _GAP, win_geo.bottom() + _GAP))
-        candidates.append((area.left() + _GAP, area.top() + _GAP))
-
-        target: QRect | None = None
-        fallback: QRect | None = None
-        for x, y in candidates:
-            rect = QRect(int(x), int(y), width, height)
-            if anchor is not None and rect.intersects(anchor):
-                continue
-            if fallback is None:
-                fallback = rect
-            if self._fits(area, rect):
-                target = rect
-                break
-        rect = target or fallback
-        if rect is None:  # pragma: no cover - 全部候选都遮图（屏幕小于图片区）
-            rect = self._below_anchor(area, anchor, width, height)
-        self.setGeometry(self._clamp(area, rect, anchor))
+        self.setGeometry(self.place(area, win_geo, anchor))
         self.show()
         self.raise_()
         self.activateWindow()
         if self.isMinimized():
             self.showNormal()
 
-    @staticmethod
-    def _fits(area: QRect, rect: QRect) -> bool:
-        """矩形是否完整落在可用屏幕区内。"""
-        return area.contains(rect)
+    @classmethod
+    def place(
+        cls,
+        area: QRect,
+        win_geo: QRect | None,
+        anchor: QRect | None,
+    ) -> QRect:
+        """计算弹窗目标矩形（**纯函数**，与屏幕尺寸无关 → 可在任意分辨率下单测）。
+
+        Args:
+            area: 屏幕可用区。
+            win_geo: 主窗口 frame 矩形；``None`` 表示无主窗口。
+            anchor: 不得被遮挡的控件矩形（图片区）；``None`` 表示无约束。
+
+        Returns:
+            弹窗应落的目标矩形。
+        """
+        # ① 右侧可用区：图片区右边界（或窗口中线）→ 主窗口右边界 ∩ 屏幕
+        if anchor is not None:
+            left_bound = anchor.right() + _GAP
+        elif win_geo is not None:
+            left_bound = win_geo.center().x()
+        else:
+            left_bound = area.center().x()
+        right_edge = min(
+            (win_geo.right() if win_geo is not None else area.right()) - _GAP,
+            area.right() - _GAP,
+        )
+        center_y = win_geo.center().y() if win_geo is not None else area.center().y()
+        height = max(_MIN_HEIGHT, min(_DEFAULT_HEIGHT, area.height() - 2 * _GAP))
+
+        # ② 右侧放得下 → 按需收窄 + **右对齐** + **垂直居中**
+        if right_edge - left_bound >= _MIN_WIDTH:
+            width = max(_MIN_WIDTH, min(_DEFAULT_WIDTH, right_edge - left_bound))
+            return cls._clamp(
+                area,
+                QRect(
+                    int(right_edge - width),
+                    int(center_y - height // 2),
+                    int(width),
+                    int(height),
+                ),
+            )
+
+        # ③ 右侧放不下（小屏 / 图片区几乎占满窗口）→ 贴图片区下方，优先保住「不遮图」
+        below = cls._below_anchor(area, anchor, _DEFAULT_WIDTH, height)
+        if below.height() >= _MIN_HEIGHT and not (
+            anchor is not None and below.intersects(anchor)
+        ):
+            return cls._clamp(area, below)
+
+        # ④ 上下左右皆无空间 → 默认尺寸贴右侧、垂直居中（允许压住图片区）
+        return cls._clamp(
+            area,
+            QRect(
+                int(right_edge - _DEFAULT_WIDTH),
+                int(center_y - height // 2),
+                _DEFAULT_WIDTH,
+                int(height),
+            ),
+        )
 
     @staticmethod
-    def _clamp(area: QRect, rect: QRect, anchor: QRect | None) -> QRect:
-        """把矩形收进屏幕；若收进来反而遮住图片区，则保持原样（不遮图优先）。"""
+    def _clamp(area: QRect, rect: QRect) -> QRect:
+        """把矩形收进屏幕可用区（纯几何收敛，不做遮图判断）。"""
         clamped = QRect(rect)
         clamped.moveLeft(
-            min(max(clamped.left(), area.left() + _GAP), max(area.right() - clamped.width(), area.left()))
+            min(
+                max(clamped.left(), area.left() + _GAP),
+                max(area.right() - clamped.width(), area.left() + _GAP),
+            )
         )
         clamped.moveTop(
-            min(max(clamped.top(), area.top() + _GAP), max(area.bottom() - clamped.height(), area.top()))
+            min(
+                max(clamped.top(), area.top() + _GAP),
+                max(area.bottom() - clamped.height(), area.top() + _GAP),
+            )
         )
-        if anchor is not None and clamped.intersects(anchor) and not rect.intersects(anchor):
-            return rect
         return clamped
 
     @staticmethod

@@ -35,7 +35,8 @@ __all__ = ["main", "build_application", "create_main_window"]
 
 APP_NAME = "报关申报要素自动校验工具"
 #: 交付版本号（对外）。与《架构设计》文档的版本号（v1.2）**属不同体系**，勿混用。
-APP_VERSION = "0.3.0"
+#: ⚠️ 改这里时**必须同步** ``ui/main_window.py::APP_VERSION``（同一版本号两处定义）
+APP_VERSION = "0.3.1"
 ORG_NAME = "CustomsChecker"
 
 

@@ -268,6 +268,92 @@ def test_parse_returns_parsed_element_type(parser: ElementParser) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════
+#  口径 v0.3.1：只有「品牌」「型号」参与识别与判定
+# ══════════════════════════════════════════════════════════════════
+
+
+def test_scope_only_brand_and_model_fields_are_used(parser: ElementParser) -> None:
+    """其他要素（用途 / 结构类型 / 额定电压 / 长度）**不得**影响 brand / model。"""
+    raw = (
+        "用途:电视机用|结构类型:有接头|品牌:baori|型号:A7A01G|"
+        "额定电压:60V|长度:150MM|材质:铜"
+    )
+    parsed = parser.parse(raw)
+    assert parsed.brand == "baori"
+    assert parsed.model == "A7A01G"
+
+
+def test_scope_other_elements_only_yields_empty(parser: ElementParser) -> None:
+    """**只有其他要素、没有品牌/型号** → 两个结果都为空，绝不"就近取值"。"""
+    raw = "用途:电视机用|结构类型:有接头|额定电压:60V|长度:150MM"
+    parsed = parser.parse(raw)
+    assert parsed.brand == ""
+    assert parsed.model == ""
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # 报关要素「0:品牌类型」——取值为品牌**归类**，不是品牌本身
+        "品牌类型:0|用途:电视机用|型号:A7A01G",
+        "品牌类型:1|品牌:baori|型号:A7A01G",
+        "商标类型:0|品牌:baori|型号:无",
+        "品牌种类:0|用途:电视机用|型号:无",
+    ],
+)
+def test_scope_brand_type_never_read_as_brand(parser: ElementParser, raw: str) -> None:
+    """``品牌类型`` 这类**非值类**要素字段不得被读成品牌值。
+
+    ⚠️ 缺此护栏时 ``品牌类型:0`` 会被读成品牌 ``0``（直接违反「不虚高」红线）。
+    """
+    parsed = parser.parse(raw)
+    assert parsed.brand != "0"
+
+
+def test_scope_model_type_never_read_as_model(parser: ElementParser) -> None:
+    """``型号类型`` 同样不得被读成型号值。"""
+    parsed = parser.parse("品牌:baori|型号类型:0|用途:电视机用")
+    assert parsed.model != "0"
+
+
+def test_scope_brand_type_with_real_brand_still_works(parser: ElementParser) -> None:
+    """排除「品牌类型」**不能误伤**同段里的真实品牌字段。"""
+    parsed = parser.parse("品牌类型:1|品牌:baori|型号:A7A01G")
+    assert parsed.brand == "baori"
+    assert parsed.model == "A7A01G"
+
+
+def test_scope_no_colon_brand_value_form_still_works(parser: ElementParser) -> None:
+    """无冒号的品牌**取值形态**（``宇同品牌`` / ``无品牌``）**不受口径收窄影响**。"""
+    assert parser.parse("宇同品牌、无型号、用途：电视机用").brand == "宇同"
+    assert parser.parse("无品牌、无型号、用途：电视机用").brand == ""
+
+
+def test_scope_spec_model_key_still_recognized(parser: ElementParser) -> None:
+    """``规格型号`` / ``产品型号`` 仍是合法型号字段（收窄不得误伤）。"""
+    assert parser.parse("品牌:baori|规格型号:A7A01G").model == "A7A01G"
+    assert parser.parse("品牌:baori|产品型号:A7A01G").model == "A7A01G"
+
+
+def test_scope_helper_excludes_non_value_keys(parser: ElementParser) -> None:
+    """``_is_non_value_key`` 判定表（护栏自证）。"""
+    assert parser._is_non_value_key("品牌类型") is True  # noqa: SLF001
+    assert parser._is_non_value_key("型号类型") is True  # noqa: SLF001
+    assert parser._is_non_value_key("品牌") is False  # noqa: SLF001
+    assert parser._is_non_value_key("规格型号") is False  # noqa: SLF001
+    assert parser._is_non_value_key("") is False  # noqa: SLF001
+
+
+def test_scope_brand_key_rejects_brand_type(parser: ElementParser) -> None:
+    """``_is_brand_key`` 必须拒收「品牌类型」，但保留「品牌」「品牌名称」等值类字段。"""
+    assert parser._is_brand_key("品牌") is True  # noqa: SLF001
+    assert parser._is_brand_key("品牌名称") is True  # noqa: SLF001
+    assert parser._is_brand_key("BRAND") is True  # noqa: SLF001
+    assert parser._is_brand_key("品牌类型") is False  # noqa: SLF001
+    assert parser._is_brand_key("商标类型") is False  # noqa: SLF001
+
+
+# ══════════════════════════════════════════════════════════════════
 #  规则外置一致性（v1.1 C.4）
 # ══════════════════════════════════════════════════════════════════
 

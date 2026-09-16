@@ -17,6 +17,9 @@
     选中行同步中/右区。
   * **P2-2 票号纠正入口**：只读标签旁的「改」按钮弹 ``QInputDialog``，改完刷新；
     取消 / 留空不改；运行期置灰。
+  * **v0.3.1 现场反馈修正**：判定链路表**不错位/不覆盖**（表头左对齐、关闭滚动条、
+    表高按内容自适应、前两列显式固定宽）；OCR 弹窗**右侧垂直居中、不置顶**
+    （定位纯函数 ``OcrTextDialog.place`` 另见 ``tests/test_ocr_dialog_position.py``）。
 
 无 PySide6 环境整体 skip。
 """
@@ -374,6 +377,173 @@ def test_chain_table_has_three_columns_two_rows(qapp) -> None:
     assert headers == ["要素", "申报值", "判定值"]
     assert card.chain_table.item(0, 0).text() == "品牌"
     assert card.chain_table.item(1, 0).text() == "型号"
+
+
+# ── 需求 5 修正：表格错位 / 覆盖（v0.3.1 现场反馈）──
+
+
+def test_chain_header_is_left_aligned_like_cells(qapp) -> None:
+    """现场反馈修正：表头**左对齐**，与单元格对齐方式一致 → 不再视觉错位。
+
+    ``QHeaderView`` 默认是**居中**对齐，而 ``QTableWidgetItem`` 默认左对齐；
+    两者混用会让"申报值 / 判定值"的表头文字与列内容看起来错开。
+    """
+    card = _card(qapp)
+    card.load_result(_three_image_result())
+    header = card.chain_table.horizontalHeader()
+    alignment = header.defaultAlignment()
+    assert bool(alignment & Qt.AlignmentFlag.AlignLeft)
+    assert not bool(alignment & Qt.AlignmentFlag.AlignHCenter)
+
+
+def test_chain_table_has_no_scrollbars(qapp) -> None:
+    """现场反馈修正：判定链路表**关闭双滚动条**（高度按内容自适应）。
+
+    滚动条一旦出现会同时 ① 挤掉右侧列宽（表头与单元格几何不同步）
+    ② 把「型号」行推出视口，与下方「判定原因」挤在一起 —— 即现场看到的
+    "错位覆盖"。
+    """
+    card = _card(qapp)
+    card.load_result(_three_image_result())
+    assert (
+        card.chain_table.verticalScrollBarPolicy()
+        == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+    )
+    assert (
+        card.chain_table.horizontalScrollBarPolicy()
+        == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+    )
+
+
+def test_chain_table_height_fits_content_without_gap(qapp) -> None:
+    """现场反馈修正：表高 = **表头实际高** + 各行高 + 边框 → 不裁行、不留空白。
+
+    写死高度时表头一变高就会冒出滚动条裁掉「型号」行；
+    不做约束时 ``QTableWidget`` 默认 ``sizeHint`` 高 192px 又在表下留一大片空白。
+    """
+    card = _card(qapp)
+    card.show()
+    card.load_result(_three_image_result())
+    qapp.processEvents()
+
+    table = card.chain_table
+    expected = table.horizontalHeader().height() + 2 * table.frameWidth() + 2
+    expected += sum(table.rowHeight(row) for row in range(table.rowCount()))
+    assert table.height() == expected
+    # 两行都在视口内（型号行不得被推出）
+    viewport_h = table.viewport().height()
+    assert viewport_h >= sum(
+        table.rowHeight(row) for row in range(table.rowCount())
+    )
+
+
+def test_chain_columns_use_explicit_widths(qapp) -> None:
+    """现场反馈修正：前两列用**显式固定宽**，第三列拉伸 → 表头与单元格几何一致。
+
+    ``ResizeToContents`` + ``Stretch`` 混用时列宽会随内容与 splitter 拖动反复重算，
+    表头与单元格可能不同步。
+    """
+    from PySide6.QtWidgets import QHeaderView
+
+    from ui.widgets.workbench_card import _CHAIN_COL_DECLARED, _CHAIN_COL_ELEMENT
+
+    card = _card(qapp)
+    card.load_result(_three_image_result())
+    header = card.chain_table.horizontalHeader()
+    assert header.sectionResizeMode(0) == QHeaderView.ResizeMode.Fixed
+    assert header.sectionResizeMode(1) == QHeaderView.ResizeMode.Fixed
+    assert header.sectionResizeMode(2) == QHeaderView.ResizeMode.Stretch
+    assert card.chain_table.columnWidth(0) == _CHAIN_COL_ELEMENT
+    assert card.chain_table.columnWidth(1) == _CHAIN_COL_DECLARED
+
+
+# ── 需求 5 修正之二：卡片内容被压缩 → 链路框「判定原因」压住「型号」行 ──
+#
+# 现场第二张截图暴露的**真根因**不在表格自身，而在父容器：
+#   ① 卡片内容高 > 窗格高 → QVBoxLayout 把子控件压到「最小尺寸之下」
+#      （实测链路框只剩 190px，其 minimumSizeHint 是 194px）；
+#   ② 之所以撑不高，是因为 `QLayout.addWidget()` 的显示是 **queued** 的 ——
+#      刚 new 出来的散行标签在事件循环下一拍前仍 isHidden()，FlowLayout 的
+#      sizeHint / heightForWidth 一律返回 0（实测 0 / 577 / 718，稳定后 886）。
+# 修法：整卡套 QScrollArea + 按 heightForWidth 设内容最小高 + 新增流式子控件
+# 显式 show()。以下 4 条为对应回归锁。
+
+
+def _squeezed_card(qapp):
+    """给一个**故意比内容矮**的卡片（复现"内容撑不下"的现场条件）。"""
+    card = _card(qapp)
+    card.resize(506, 360)
+    card.show()
+    card.load_result(_three_image_result())
+    qapp.processEvents()
+    return card
+
+
+def test_chain_frame_is_never_squeezed_below_its_minimum(qapp) -> None:
+    """可证伪回归锁：判定链路框**不得**被压到最小尺寸之下。
+
+    原缺陷下实测 ``chainFrame.height() == 190 < minimumSizeHint().height() == 194``
+    —— 少掉的 4px 正是「判定原因」与表格重叠的起点。
+    """
+    card = _squeezed_card(qapp)
+    frame = card.chain_table.parentWidget()
+    assert frame.height() >= frame.minimumSizeHint().height()
+
+
+def test_chain_reason_does_not_overlap_table(qapp) -> None:
+    """可证伪回归锁：三块纵向几何**严格不交叠**（表格 ⊂ 原因 ⊂ 结果）。"""
+    card = _squeezed_card(qapp)
+    table = card.chain_table.geometry()
+    reason = card.chain_reason.geometry()
+    verdict = card.chain_verdict.geometry()
+    assert reason.top() >= table.bottom(), f"判定原因压住表格：{reason} vs {table}"
+    assert verdict.top() >= reason.bottom()
+    # 反向锁：表格两行都在自身视口内（未被滚动条推出）
+    assert card.chain_table.viewport().height() >= sum(
+        card.chain_table.rowHeight(r) for r in range(card.chain_table.rowCount())
+    )
+
+
+def test_card_content_takes_height_for_width(qapp) -> None:
+    """内容最小高 = ``heightForWidth(视口宽)``，且重算**幂等不漂移**。
+
+    原缺陷下 ``content`` 被钉在视口高（759），``minimumHeight`` 在
+    0 / 577 / 718 之间乱跳（每拍算出的值都不同）→ 分配不足 → 压扁子控件。
+    """
+    card = _squeezed_card(qapp)
+    content = card.scroll.widget()
+    width = card.scroll.viewport().width()
+    need = content.heightForWidth(width)
+    assert need > 0
+    assert content.minimumHeight() == need
+    # 幂等：连算 3 次不得漂移（原缺陷下是 684→718→577 式的抖动）
+    for _ in range(3):
+        card._fit_content_height()  # noqa: SLF001
+        assert content.minimumHeight() == need
+    assert card.scroll.verticalScrollBarPolicy() != Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+
+
+def test_flow_labels_are_shown_synchronously_after_render(qapp) -> None:
+    """**根因锁**：新增流式子控件被**当拍** show，几何查询不得返回 0。
+
+    ``QLayout.addWidget()`` 内部用 queued ``_q_showIfNotHidden`` 显示子控件；
+    若不显式 show，本用例（**刻意不 processEvents**）会看到标签仍 hidden、
+    ``FlowLayout.heightForWidth() == 0``。
+    """
+    card = _card(qapp)
+    card.show()
+    card.load_result(_three_image_result())  # 刻意不 processEvents
+    labels = [
+        card.line_flow.itemAt(i).widget() for i in range(card.line_flow.count())
+    ]
+    labels = [lb for lb in labels if lb is not None]
+    assert labels, "散行区应有标签"
+    assert all(not lb.isHidden() for lb in labels), "新增标签必须当拍非隐藏"
+    assert card.line_flow.heightForWidth(card.scroll.viewport().width()) > 0
+    # 证据图号按钮同理（同一 queued 机制）
+    assert card.evidence_buttons_row.count() > 0
+    btn = card.evidence_buttons_row.itemAt(0).widget()
+    assert btn is not None and not btn.isHidden()
 
 
 def test_chain_declared_column_shows_declared_values(qapp) -> None:

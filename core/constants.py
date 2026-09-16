@@ -26,6 +26,8 @@ __all__ = [
     "VERDICT_LABELS",
     "FIELD_BRAND",
     "FIELD_MODEL",
+    "JUDGED_FIELDS",
+    "NON_VALUE_FIELD_SUFFIXES",
     "verdict_text",
     "verdict_label",
     "ALL_VERDICTS",
@@ -93,6 +95,20 @@ VERDICT_LABELS: dict[Verdict, str] = {
 #: 由 ``tests/test_constants.py`` 断言二者一致，防字面量漂移。
 FIELD_BRAND: str = "品牌"
 FIELD_MODEL: str = "型号"
+
+#: 【口径 · 用户裁定 2026-09-16】**只有这两个要素参与识别与判定**。
+#:
+#: 申报要素原文常含多个要素（实测样本：``用途`` / ``结构类型`` / ``品牌`` / ``型号`` /
+#: ``额定电压`` / ``长度`` …）。本工具**只对「品牌」「型号」做图片侧识别 + 一致性判定**；
+#: 其余要素**既不识别、也不判定** —— 不进入任何候选、不出现在判定链路、
+#: 不影响判定结论、不进 13 列汇总表。
+#: ``core/element_parser.py`` 与 ``core/judge_engine.py`` 的判定范围均以本表为准。
+JUDGED_FIELDS: tuple[str, ...] = (FIELD_BRAND, FIELD_MODEL)
+
+#: **非「值」类字段后缀** —— 形如 ``品牌类型`` / ``型号类型`` / ``商标类别`` 的**其他要素**
+#: 字段名：其取值是"品牌的归类"（如 ``0`` 表示无品牌），**不是品牌本身**，必须显式排除。
+#: ⚠️ 缺此护栏时 ``品牌类型:0`` 会被读成品牌值 ``0`` —— 直接违反「不虚高」红线。
+NON_VALUE_FIELD_SUFFIXES: tuple[str, ...] = ("类型", "种类", "类别")
 
 #: 全部判定（固定顺序，供 UI 四卡与统计遍历）
 ALL_VERDICTS: tuple[Verdict, ...] = (    Verdict.PASS,

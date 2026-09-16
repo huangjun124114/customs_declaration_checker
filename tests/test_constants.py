@@ -75,6 +75,30 @@ class TestFieldNames:
         assert judge_engine._FIELD_MODEL == C.FIELD_MODEL  # noqa: SLF001
 
 
+class TestJudgedFieldsScope:
+    """【口径 · 2026-09-16】只有「品牌」「型号」参与识别与判定。"""
+
+    def test_only_brand_and_model_are_judged(self) -> None:
+        """判定范围**恰为**品牌 + 型号，顺序固定。"""
+        assert C.JUDGED_FIELDS == (C.FIELD_BRAND, C.FIELD_MODEL)
+
+    def test_judged_fields_excludes_other_elements(self) -> None:
+        """申报要素原文里的其他要素（用途 / 结构类型 / 额定电压 …）不得入选。"""
+        others = {"用途", "结构类型", "额定电压", "长度", "材质", "品牌类型", "型号类型"}
+        assert others.isdisjoint(C.JUDGED_FIELDS)
+
+    def test_non_value_suffixes_cover_brand_type(self) -> None:
+        """非「值」类字段后缀必须覆盖「品牌类型」这类**归类型**要素。"""
+        assert "类型" in C.NON_VALUE_FIELD_SUFFIXES
+        assert "品牌类型".endswith(tuple(C.NON_VALUE_FIELD_SUFFIXES))
+        assert "型号类型".endswith(tuple(C.NON_VALUE_FIELD_SUFFIXES))
+
+    def test_judged_fields_are_exported(self) -> None:
+        """新口径常量必须进 ``__all__``（防被当成私有符号悄悄改动）。"""
+        assert "JUDGED_FIELDS" in C.__all__
+        assert "NON_VALUE_FIELD_SUFFIXES" in C.__all__
+
+
 class TestColumns:
     """汇总表 13 列（SOP 七）。"""
     def test_exactly_13_columns(self) -> None:

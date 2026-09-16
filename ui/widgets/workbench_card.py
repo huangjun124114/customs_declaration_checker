@@ -25,8 +25,8 @@ from __future__ import annotations
 
 import html
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtCore import QEvent, Qt, Signal
+from PySide6.QtGui import QColor, QResizeEvent, QShowEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QScrollArea,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -80,9 +81,16 @@ _CHAIN_HEADERS: tuple[str, ...] = ("要素", "申报值", "判定值")
 _CHAIN_FIELDS: tuple[str, ...] = (FIELD_BRAND, FIELD_MODEL)
 #: 判定链路表行高（容 2 行换行文案，避免长判定值被裁切）
 _CHAIN_ROW_HEIGHT: int = 40
-#: 判定链路表固定高度（= 表头 28 + 2 行 × 行高 + 边框余量）
-#: ⚠️ 必须固定：``QTableWidget`` 默认 sizeHint 高 192px，会在表体下方留一大片空白
-_CHAIN_TABLE_HEIGHT: int = 28 + 2 * _CHAIN_ROW_HEIGHT + 4
+#: 前两列的**固定列宽**（要素 / 申报值）；第三列「判定值」用 Stretch 吃掉余量。
+#: ⚠️ 必须用 Fixed 而非 ResizeToContents：``ResizeToContents`` + ``Stretch`` 混用时，
+#: 列宽随内容与 splitter 拖动反复重算，表头与单元格的几何可能不同步（视觉"错位"）。
+_CHAIN_COL_ELEMENT: int = 72
+_CHAIN_COL_DECLARED: int = 150
+#: 判定链路表**初始**高度（表头 28 + 2 行 × 行高 + 边框余量）。
+#: ⚠️ 运行期由 :meth:`WorkbenchCard._fit_chain_height` 按**表头实际高**校正 ——
+#: ``QTableWidget`` 默认 ``sizeHint`` 高 192px 会在表体下留大片空白；而把高度
+#: 写死成常数，又会在表头随字体/DPI 变高时裁掉末行并冒出纵向滚动条（实测"错位覆盖"根因）。
+_CHAIN_TABLE_FALLBACK_HEIGHT: int = 28 + 2 * _CHAIN_ROW_HEIGHT + 4
 
 
 class WorkbenchCard(QFrame):
@@ -108,18 +116,63 @@ class WorkbenchCard(QFrame):
         self._current_image_path: str = ""
         #: 图号按钮：image_path → 按钮（供高亮 / 测试查询）
         self._seq_buttons: dict[str, QPushButton] = {}
+        #: `_fit_content_height` 重入闸（视口 Resize ↔ 内容 resize 会互相触发）
+        self._fitting_content: bool = False
         self._build_ui()
         self.clear()
 
     # ─────────────────────── 构建 ───────────────────────
 
     def _build_ui(self) -> None:
-        """搭建卡片布局。"""
-        outer = QVBoxLayout(self)
+        """搭建卡片布局。
+
+        **为什么整卡套一层 ``QScrollArea``（v0.3.1 现场反馈修正）**：
+        卡片内容高度 = 标题 + 身份 + 判定徽标 + 判定链路（2 行表 + 判定原因 + 判定结果）
+        + 证据图按钮 + **散行 OCR（行数不定）** + 重判行 + 备注行 + 操作行。
+        当内容总高 > 窗格高时，``QVBoxLayout`` 会把子控件压到**最小尺寸以下** ——
+        实测判定链路框被压成 190px（内容实需 228px），于是「判定原因」叠到表格的
+        「型号」行上，正是现场看到的"错位覆盖"。
+
+        ⚠️ **只加滚动区还不够**：``widgetResizable(True)`` 默认把内容控件拉到
+        **视口高**（实测 759），首选高（``sizeHint`` 1274）压根不参与分配。
+        真正生效的是 :meth:`_fit_content_height` —— 用 ``heightForWidth`` 取
+        **按当前宽度换行后真正需要的高度**（实测 886，远小于过度估计的 1274）
+        并写入 ``minimumHeight``，内容随宽度自适应改按 886 分配，
+        链路框因此拿到 228px（≥ 最小 194），**重叠消失**，超出部分交给滚动条。
+
+        ⚠️ **底部操作区必须留在滚动区外**（``QFrame#cardFooter``）：
+        「重判为 / 备注 / 标记待补图 / 保存重判」是**每次复核都要用**的动作；
+        若一起放进滚动区，内容一超高按钮就被推到折叠线以下，得先滚动才够得着 ——
+        那只是把"压扁"换成了"藏起来"。故 shell = 滚动区(拉伸) + 底部操作区(常驻)。
+        """
+        shell = QVBoxLayout(self)
+        shell.setContentsMargins(0, 0, 0, 0)
+        shell.setSpacing(0)
+
+        self.scroll = QScrollArea(self)
+        self.scroll.setObjectName("cardScroll")
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        # 横向不滚动：内部 FlowLayout 已按可用宽度自动换行
+        self.scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        # 拉伸因子 1：窗口变高时把多出的高度给滚动区，底部操作区保持自然高
+        shell.addWidget(self.scroll, 1)
+
+        # 视口宽度一变（滚动条出现/消失、splitter 拖动）→ 散行换行数变 → 重算内容高
+        self.scroll.viewport().installEventFilter(self)
+
+        content = QWidget(self.scroll)
+        content.setObjectName("cardScrollContent")
+        self.scroll.setWidget(content)
+
+        # ⚠️ 以下所有控件都挂到 ``content`` 下（由布局自动 reparent）
+        outer = QVBoxLayout(content)
         outer.setContentsMargins(12, 12, 12, 12)
         outer.setSpacing(8)
 
-        title = QLabel("证据 / 重判", self)
+        title = QLabel("证据 / 重判", content)
         title.setObjectName("zoneTitle")
         outer.addWidget(title)
 
@@ -167,40 +220,48 @@ class WorkbenchCard(QFrame):
         self.ocr_dialog.previous_requested.connect(lambda: self._step_image(-1))
         self.ocr_dialog.next_requested.connect(lambda: self._step_image(1))
 
+        # ── 底部操作区（**常驻，不参与滚动**）──
+        self.footer = QFrame(self)
+        self.footer.setObjectName("cardFooter")
+        footer = QVBoxLayout(self.footer)
+        footer.setContentsMargins(12, 6, 12, 10)
+        footer.setSpacing(8)
+        shell.addWidget(self.footer, 0)
+
         # 重判行
         judge_row = QHBoxLayout()
-        judge_row.addWidget(QLabel("重判为：", self))
-        self.verdict_combo = QComboBox(self)
+        judge_row.addWidget(QLabel("重判为：", self.footer))
+        self.verdict_combo = QComboBox(self.footer)
         for verdict in WORKBENCH_VERDICTS:
             display = VERDICT_TEXT.get(verdict, verdict.value)
             self.verdict_combo.addItem(display, verdict.value)
         judge_row.addWidget(self.verdict_combo, 1)
-        outer.addLayout(judge_row)
+        footer.addLayout(judge_row)
 
         # 备注
         note_row = QHBoxLayout()
-        note_row.addWidget(QLabel("备注：", self))
-        self.note_edit = QLineEdit(self)
+        note_row.addWidget(QLabel("备注：", self.footer))
+        self.note_edit = QLineEdit(self.footer)
         self.note_edit.setPlaceholderText("填写复核说明 / 补图要求（可选）")
         note_row.addWidget(self.note_edit, 1)
-        outer.addLayout(note_row)
+        footer.addLayout(note_row)
 
         # 标记待补图 + 保存
         action_row = QHBoxLayout()
-        self.mark_missing_check = QCheckBox("标记待补图", self)
+        self.mark_missing_check = QCheckBox("标记待补图", self.footer)
         self.mark_missing_check.setToolTip("🔵 缺图记录：无图可看，仅能标记待补图 + 备注")
-        self.btn_save = QPushButton("保存重判", self)
+        self.btn_save = QPushButton("保存重判", self.footer)
         self.btn_save.setObjectName("primaryButton")
         self.btn_save.clicked.connect(self._on_save)
         action_row.addWidget(self.mark_missing_check)
         action_row.addStretch(1)
         action_row.addWidget(self.btn_save)
-        outer.addLayout(action_row)
+        footer.addLayout(action_row)
 
-        self.hint_label = QLabel("", self)
+        self.hint_label = QLabel("", self.footer)
         self.hint_label.setObjectName("reviewHint")
         self.hint_label.setWordWrap(True)
-        outer.addWidget(self.hint_label)
+        footer.addWidget(self.hint_label)
 
     def _build_chain(self) -> QWidget:
         """构建「判定链路」区块（需求 5：三列 ``要素 | 申报值 | 判定值``）。
@@ -230,14 +291,32 @@ class WorkbenchCard(QFrame):
         self.chain_table.setShowGrid(True)
         self.chain_table.setWordWrap(True)
         self.chain_table.setStyleSheet(_CHAIN_TABLE_QSS)
+        # ⚠️ 关闭双滚动条：表高按内容自适应。滚动条一旦出现会同时
+        #    ① 挤掉右侧列宽（表头与单元格几何不同步）② 把「型号」行推出视口，
+        #    与下方「判定原因」挤在一起 → 就是实测反馈的"错位覆盖"。
+        self.chain_table.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.chain_table.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
         header = self.chain_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        # ⚠️ QHeaderView 默认**居中**对齐，而单元格默认左对齐 → 表头文字与列内容
+        #    看起来"错位"。统一为左对齐（与单元格一致）。
+        header.setDefaultAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+        header.setMinimumSectionSize(56)
+        header.setStretchLastSection(True)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.chain_table.setColumnWidth(0, _CHAIN_COL_ELEMENT)
+        self.chain_table.setColumnWidth(1, _CHAIN_COL_DECLARED)
         for row, field in enumerate(_CHAIN_FIELDS):
             self.chain_table.setItem(row, 0, QTableWidgetItem(field))
             self.chain_table.setRowHeight(row, _CHAIN_ROW_HEIGHT)
-        self.chain_table.setFixedHeight(_CHAIN_TABLE_HEIGHT)
+        self.chain_table.setFixedHeight(_CHAIN_TABLE_FALLBACK_HEIGHT)
         layout.addWidget(self.chain_table)
 
         # ③ 判定原因（差异明细 / 一句话理由）—— 保留可追溯红线
@@ -256,6 +335,87 @@ class WorkbenchCard(QFrame):
         )
         layout.addWidget(self.chain_verdict)
         return frame
+
+    def _fit_chain_height(self) -> None:
+        """按「**表头实际高** + 各行高 + 边框」校正判定链路表高度。
+
+        **为什么不能写死常数**：表头高度随字体 / DPI / QSS 的 ``padding`` 变化
+        （实测在某些机器上是 30px、某些是 34px）。写死 112px 时表头一变高，
+        纵向滚动条就会出现 —— 滚动条既挤掉右侧列宽（表头与单元格几何不同步 → 错位），
+        又把「型号」行推出视口（与下方「判定原因」视觉重叠）。此处按实测值算，
+        既**不留空白**（``QTableWidget`` 默认 ``sizeHint`` 高 192px）也不裁行。
+        """
+        table = self.chain_table
+        height = table.horizontalHeader().height() + 2 * table.frameWidth() + 2
+        for row in range(table.rowCount()):
+            height += table.rowHeight(row)
+        table.setFixedHeight(height)
+
+    def _fit_content_height(self) -> None:
+        """把滚动内容的**最小高度**校正为「按当前宽度换行后真正需要的高度」。
+
+        **为什么必须显式做**：``QScrollArea(widgetResizable=True)`` 只会把内容控件
+        拉到 ``max(视口高, 内容最小高)``；内容布局的最小高（实测 600）远小于它
+        **真正需要**的高（886，其中散行 OCR 换行后就要 279）。于是内容被钉在
+        视口高 759 上，``QVBoxLayout`` 只能在「最小 ~ 首选」之间**压缩**子控件 ——
+        判定链路框被压到 190（< 最小 194），「判定原因」便叠到表格的「型号」行上。
+
+        这里取 ``heightForWidth`` 而非 ``sizeHint``：后者按「标签不被换行」估算，
+        实测高达 1274（过度估计 → 白滚动）；前者按实际宽度算换行，实测 886。
+
+        ⚠️ 宽度依赖 → 必须在**宽度变化**（splitter 拖动 / 窗口缩放）与
+        **内容变化**（换记录 / 切图 → 散行数变化）后都重算。
+        """
+        if self._fitting_content:
+            return
+        content = self.scroll.widget()
+        layout = content.layout() if content is not None else None
+        if content is None or layout is None:
+            return
+        self._fitting_content = True
+        try:
+            width = int(self.scroll.viewport().width())
+            if width <= 0:
+                width = int(content.width())
+            need = content.heightForWidth(width) if content.hasHeightForWidth() else -1
+            if need <= 0:
+                # 极端兜底：无 hfw 时退回首选高（宁可多滚一点，也不裁内容）
+                need = int(layout.sizeHint().height())
+            if need <= 0:
+                return
+            if need != content.minimumHeight():
+                content.setMinimumHeight(need)
+            content.resize(max(width, content.width()), need)
+        finally:
+            self._fitting_content = False
+
+    def eventFilter(self, obj: object, event: QEvent) -> bool:  # noqa: N802 - Qt 规定
+        """滚动视口 Resize → 重算内容高（防「滚动条出现后列宽变窄」导致裁内容）。"""
+        if obj is self.scroll.viewport() and event.type() == QEvent.Type.Resize:
+            self._fit_content_height()
+        return super().eventFilter(obj, event)
+
+    def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 - Qt 规定的驼峰名
+        """显示时校正一次判定链路表高度（此刻表头高度才最终确定）。"""
+        super().showEvent(event)
+        self._relayout()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802 - Qt 规定的驼峰名
+        """宽度变化 → 散行标签换行数变化 → 重新校正内容高度。"""
+        super().resizeEvent(event)
+        self._fit_content_height()
+
+    def _relayout(self) -> None:
+        """内容/尺寸变化后的统一校正入口：先表高、再滚动内容高。
+
+        ⚠️ 这里**不做延迟补算**：新增子控件由 :meth:`_reveal` 同步 ``show()``
+        之后，当拍测得的高度即为稳定值（实测 886）。若改用
+        ``QTimer.singleShot`` 补算，反而可能在「子控件瞬时不可见」的一拍里
+        算出偏小值并**写回更小的 minimumHeight**，把压缩缺陷重新引回来。
+        宽度变化由滚动视口的 ``Resize`` 事件过滤兜底（见 :meth:`eventFilter`）。
+        """
+        self._fit_chain_height()
+        self._fit_content_height()
 
     # ─────────────────────── 载入记录 ───────────────────────
 
@@ -309,6 +469,8 @@ class WorkbenchCard(QFrame):
         else:
             self.hint_label.setText("")
         self.setEnabled(True)
+        # 内容整体换过一轮（链路 / 图号 / 散行）→ 重新校正高度
+        self._relayout()
 
     def set_current_image(self, path: str) -> None:
         """切换「当前查看的图片」并只重渲染该图的证据。
@@ -327,6 +489,8 @@ class WorkbenchCard(QFrame):
             self._current_image_path = target
         self._render_evidence_buttons(self._result)
         self._render_current_image(self._result)
+        # 散行数随图片变化 → 内容高度需重算
+        self._fit_content_height()
 
     def current_image_path(self) -> str:
         """返回当前选中（正在展示 OCR）的图片路径。"""
@@ -378,10 +542,12 @@ class WorkbenchCard(QFrame):
             self._seq_buttons[path] = btn
             self._style_seq_button(btn, active=(path == self._current_image_path))
             self.evidence_buttons_row.addWidget(btn)
+            self._reveal(btn)
         if not shown:
             hint = QLabel("（无可预览图片）", self.evidence_buttons_area)
             hint.setStyleSheet("color:#909399;")
             self.evidence_buttons_row.addWidget(hint)
+            self._reveal(hint)
 
     def _on_seq_button(self, path: str) -> None:
         """图号按钮点击：切换当前图并通知外部（左侧查看器）。"""
@@ -421,6 +587,8 @@ class WorkbenchCard(QFrame):
         self.chain_verdict.setText(
             f"<b>判定结果</b>　{html.escape(verdict_text)}{tail}"
         )
+        # 文案变化可能改变换行行数 → 同步校正表高（防裁行 / 防空白）
+        self._fit_chain_height()
 
     @staticmethod
     def _match_for(result: CheckResult, field: str) -> TokenMatch | None:
@@ -680,13 +848,14 @@ class WorkbenchCard(QFrame):
                 widget.deleteLater()
 
     def _fill_flow_labels(self, layout, texts: list[str], *, empty_hint: str) -> None:
-        """把 ``texts`` 逐条渲染为流式小标签卡（深色面 + 浅色字）。"""
+        """把 ``texts`` 逐条渲染为流式小标签卡（浅色面 + 深色字）。"""
         self._clear_layout(layout)
         parent = layout.parentWidget()
         if not texts:
             hint = QLabel(empty_hint, parent)
             hint.setStyleSheet("color:#909399;")
             layout.addWidget(hint)
+            self._reveal(hint)
             return
         for text in texts:
             card = QLabel(text, parent)
@@ -694,6 +863,24 @@ class WorkbenchCard(QFrame):
             card.setStyleSheet(_LABEL_CARD_QSS)
             card.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             layout.addWidget(card)
+            self._reveal(card)
+
+    @staticmethod
+    def _reveal(widget: QWidget) -> None:
+        """立刻让新加入布局的子控件「非隐藏」，使几何查询当拍即准。
+
+        ⚠️ **v0.3.1 关键坑**：``QLayout.addWidget()`` 内部是用
+        ``QMetaObject::invokeMethod(w, "_q_showIfNotHidden", QueuedConnection)``
+        把新子控件**排队**显示的。在事件循环下一拍之前，这些标签仍然是
+        ``isHidden() == True`` → ``QWidgetItem::isEmpty()`` 成立 →
+        ``FlowLayout`` 的 ``sizeHint`` / ``heightForWidth`` 全部返回 **0**
+        → 上层算出的"内容需要多高"严重偏小（实测 0 / 577 / 718，而非 886），
+        子控件遂被压缩，判定链路框只剩 190px → 「判定原因」叠到表格「型号」行。
+
+        显式 ``show()`` 会**同步**清掉 hidden 标记（父链可见时即刻可见），
+        后续的撑高计算随即准确。
+        """
+        widget.show()
 
     # ─────────────────────── 保存 ───────────────────────
 
@@ -726,6 +913,7 @@ class WorkbenchCard(QFrame):
         self.mark_missing_check.setChecked(False)
         self.hint_label.clear()
         self.setEnabled(False)
+        self._relayout()
 
     def _clear_chain(self) -> None:
         """清空判定链路三列表体（保留表头）。"""
