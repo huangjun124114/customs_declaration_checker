@@ -1,0 +1,38 @@
+# 分隔符 / 冒号归一化表（v1.1 C 示例 + 实测 P8）
+# 用途：申报要素文本解析入口先做"不可见字符剥离 → 分隔符归一化"。
+# ⚠️ 同步关系：separators / colon_variants 须与 core/constants.py 的
+#    DEFAULT_SEPARATORS / DEFAULT_COLON_VARIANTS 一致。
+
+# 字段分隔符（统一归一化为半角竖线 "|"）
+# 实测 P8：分隔符混用 |(半角竖线) 与 、(顿号) 与 ;(分号)
+separators:
+  - "|"
+  - "、"
+  - ";"
+  - "；"
+  - "/"
+
+# 归一化目标（统一用半角竖线）
+canonical_separator: "|"
+
+# 冒号变体（统一归一化为半角 ":"）
+# 实测 P8：冒号混用 : 与 ：
+colon_variants:
+  - ":"
+  - "："
+
+# 冒号归一化目标
+canonical_colon: ":"
+
+# 需剥离的不可见字符（SOP 3.5 规则#4：零宽字符污染）
+# 说明：`\s` 不匹配 \u200b，故必须在解析入口显式剥离
+invisible_chars:
+  - "\u200b"   # ZERO WIDTH SPACE
+  - "\u200c"   # ZERO WIDTH NON-JOINER
+  - "\u200d"   # ZERO WIDTH JOINER
+  - "\ufeff"   # BOM / ZERO WIDTH NO-BREAK SPACE
+  - "\u00a0"   # NO-BREAK SPACE
+  - "\u3000"   # IDEOGRAPHIC SPACE
+  - "\t"
+  - "\r"
+  - "\n"

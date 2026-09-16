@@ -1,0 +1,643 @@
+"""全部数据模型与枚举（core.models，对应架构设计第 4 节类图）。
+
+本模块是**全层共享**的数据契约：``core`` / ``app`` / ``ui`` 都依赖它，
+但它**不依赖任何其他业务模块**（除 ``infra`` 的常量工具外），保证无循环依赖。
+
+包含：
+  * 枚举：``Verdict`` / ``NoiseLevel`` / ``LogLevel`` / ``StructureVariant``
+  * 模型：``ImageEvidence`` / ``OcrText`` / ``DeclarationRecord`` /
+    ``DifferenceDetail`` / ``CheckResult`` / ``FieldMapping`` / ``ExcelProbeResult`` /
+    ``ParsedElement`` / ``Fingerprint`` / ``ResumeSnapshot``
+
+**注意**：``Verdict`` 枚举只定义"是哪一类判定"，其**面向用户的字符串**在
+``core.constants`` 中定义（与 SOP 1.3 逐字一致），避免两处硬编码漂移。
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from dataclasses import field as dc_field
+from enum import Enum
+from typing import Any
+
+__all__ = [
+    "Verdict",
+    "NoiseLevel",
+    "LogLevel",
+    "StructureVariant",
+    "ImageEvidence",
+    "OcrText",
+    "DeclarationRecord",
+    "DifferenceDetail",
+    "CheckResult",
+    "FieldMapping",
+    "ExcelProbeResult",
+    "ParsedElement",
+    "Fingerprint",
+    "ResumeSnapshot",
+    "build_key",
+    "split_key",
+]
+
+
+# ══════════════════════════════════════════════════════════════════
+#  枚举
+# ══════════════════════════════════════════════════════════════════
+
+
+class Verdict(str, Enum):
+    """四类判定结果（对应 SOP 1.3）。
+
+    | 枚举值 | SOP 口径 | 触发条件 |
+    |---|---|---|
+    | ``PASS``     | ✅ 校验合格 | 申报值与图片证据一致；或双方均为"无" |
+    | ``FAIL``     | ❌ 校验异常 | 有值但不一致；或申报缺失但图片明确有 |
+    | ``NO_MARK``  | ⚠️ 缺图内标识，人工复核 | 图片无品牌/型号文字；OCR 证据不足 |
+    | ``NO_IMAGE`` | 🔵 缺图，人工复核 | 共享目录找不到对应图片 |
+    """
+
+    PASS = "PASS"
+    FAIL = "FAIL"
+    NO_MARK = "NO_MARK"
+    NO_IMAGE = "NO_IMAGE"
+
+
+class NoiseLevel(str, Enum):
+    """疑似噪声三态（对应架构设计 C6 / R5，**不虚高红线**）。
+
+    ``SUSPICIOUS`` 的记录**强制**降级为 ``Verdict.NO_MARK``（⚠️），
+    **禁止**直达 ``Verdict.FAIL``（❌）。
+    """
+
+    DEFINITE_MATCH = "DEFINITE_MATCH"    # 明确匹配，证据充分
+    SUSPICIOUS = "SUSPICIOUS"            # 疑似噪声（易混字符/编辑距离/低置信度）
+    CLEAR_MISMATCH = "CLEAR_MISMATCH"    # 明确不一致，证据充分
+
+
+class LogLevel(str, Enum):
+    """日志级别（与 ``infra.logger.LogLevel`` 取值一一对应）。"""
+
+    DEBUG = "DEBUG"
+    INFO = "INFO"
+    WARN = "WARN"
+    ERROR = "ERROR"
+
+
+class StructureVariant(str, Enum):
+    """Excel 结构变体（对应 SOP Phase 1 表）。
+
+    | 变体 | 特征 |
+    |---|---|
+    | ``A_OLD``           | 首行即表头，含"出货通知书号"列 |
+    | ``B_DOC_COLON``     | 独立 Sheet，标题 ``出货通知书号:SA...``（**有冒号**） |
+    | ``C_DOC_NOCOLON``   | 独立 Sheet，标题 ``出货通知书号SA...``（**无冒号**） |
+    | ``D_DUAL_SHEET``    | 双 Sheet：Sheet1 是箱明细（易误中），Sheet2 才是要素表 |
+    | ``E_NO_ORDER_COL``  | 要素表无"订单号"列 → order_no 置空 + 子目录兜底扫描 |
+    """
+
+    A_OLD = "A"
+    B_DOC_COLON = "B"
+    C_DOC_NOCOLON = "C"
+    D_DUAL_SHEET = "D"
+    E_NO_ORDER_COL = "E"
+    UNKNOWN = "UNKNOWN"
+
+
+# ══════════════════════════════════════════════════════════════════
+#  Key 构造（三级索引唯一键，幂等的基础）
+# ══════════════════════════════════════════════════════════════════
+
+#: key 分隔符（半角竖线，顺序固定）
+KEY_SEP = "|"
+
+
+def build_key(ticket_no: str, part_no: str, order_no: str) -> str:
+    """构造三级索引唯一键 ``出货号|料号|订单``。
+
+    规则（架构设计 9.2）：
+      * 顺序固定为「出货号 → 料号 → 订单」；
+      * 分隔符固定为半角竖线 ``|``；
+      * 各段 ``strip`` 后**保留原大小写**（不做 upper）；
+      * **空段保留**（不省略分隔符），保证段数恒为 3。
+
+    同一 key 同时用于 ``ResumeStore`` 断点、累积、``ReviewStore`` 改判覆盖
+    —— 三者共用一把钥匙，保证 resume/accum/review 永不同步（SOP 陷阱 #2）。
+
+    Args:
+        ticket_no: 出货通知书号。
+        part_no: 成品料号。
+        order_no: 订单号。
+
+    Returns:
+        形如 ``SA26090215|N011901-007386-001|2660326M`` 的字符串。
+    """
+    return KEY_SEP.join(
+        [
+            (ticket_no or "").strip(),
+            (part_no or "").strip(),
+            (order_no or "").strip(),
+        ]
+    )
+
+
+def split_key(key: str) -> tuple[str, str, str]:
+    """把 key 反解为 ``(ticket_no, part_no, order_no)``。
+
+    因 :func:`build_key` 保证段数恒为 3，反解安全；异常 key 用空串补齐。
+
+    Args:
+        key: 由 :func:`build_key` 构造的键。
+
+    Returns:
+        三元组；段数不足时以空串补齐。
+    """
+    parts = (key or "").split(KEY_SEP)
+    while len(parts) < 3:
+        parts.append("")
+    return parts[0].strip(), parts[1].strip(), parts[2].strip()
+
+
+# ══════════════════════════════════════════════════════════════════
+#  数据模型
+# ══════════════════════════════════════════════════════════════════
+
+
+@dataclass
+class ImageEvidence:
+    """单张图片证据。
+
+    Attributes:
+        image_path: 图片绝对路径（可能是 UNC）。
+        seq: 序号（取自文件名 ``&{序号}`` 段；**不可假设连续**，会跳号）。
+        exists: 文件是否存在且可读。
+        ocr_confidence: 该图 OCR 的最低置信度（0.0 表示未识别/失败）。
+        unreachable: 是否因「共享盘不可达 / 权限不足」导致读图失败
+            （区别于"文件不存在"，对应架构设计 12.D.3）。
+        not_found: 共享根**可达**、但票号/料号/订单目录确实**不存在**
+            （→ 上层判 ``NO_IMAGE`` 🔵，正常继续）。
+            与 ``unreachable`` **互斥**；``unreachable=True`` 时本字段恒为 ``False``。
+        ocr: 该图的 OCR 结果（``OcrText``），未跑 OCR 时为 ``None``。
+    """
+
+    image_path: str = ""
+    seq: int = 0
+    exists: bool = False
+    ocr_confidence: float = 0.0
+    unreachable: bool = False
+    not_found: bool = False
+    ocr: OcrText | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """序列化为字典（供 JSON 证据落盘）。"""
+        return {
+            "image_path": self.image_path,
+            "seq": self.seq,
+            "exists": self.exists,
+            "ocr_confidence": self.ocr_confidence,
+            "unreachable": self.unreachable,
+            "not_found": self.not_found,
+            "ocr": self.ocr.to_dict() if self.ocr is not None else None,
+        }
+
+
+@dataclass
+class OcrText:
+    """单张图片的 OCR 结果。
+
+    Attributes:
+        image_path: 图片来源路径。
+        text_raw: 识别出的**全部**文本（多行以 ``\\n`` 连接）。
+        confidence: 置信度（取最小 scores，保守估计；0.0 表示无 scores）。
+        boxes: 文本框列表（``[(x1,y1,x2,y2), ...]``）。
+        seq: 图片序号。
+        low_confidence: 是否低于阈值（低于则 NoiseGuard 优先判 SUSPICIOUS）。
+    """
+
+    image_path: str = ""
+    text_raw: str = ""
+    confidence: float = 0.0
+    boxes: list[Any] = dc_field(default_factory=list)
+    seq: int = 0
+    low_confidence: bool = False
+
+    def lines(self) -> list[str]:
+        """按行拆分 ``text_raw``（去除空行，逐行 strip）。"""
+        return [line.strip() for line in (self.text_raw or "").splitlines() if line.strip()]
+
+    def to_dict(self) -> dict[str, Any]:
+        """序列化为字典（**完整原文只进 JSON 证据文件，不进日志**）。"""
+        return {
+            "image_path": self.image_path,
+            "text_raw": self.text_raw,
+            "confidence": self.confidence,
+            "seq": self.seq,
+            "low_confidence": self.low_confidence,
+        }
+
+
+@dataclass
+class DeclarationRecord:
+    """一条申报记录（Excel 一行 → 内部模型）。
+
+    Attributes:
+        ticket_no: 出货通知书号（一级索引，定位 ``{票号}`` 目录）。
+        part_no: **成品料号**（内部语义，对应图片文件名**第二段**）。
+        order_no: **订单号**（内部语义，对应图片目录名与文件名**首段**）。
+        product_name: 中文品名（汇总表辅助列）。
+        seq_no: Excel 序号（追溯对齐，**非**图片文件名序号）。
+        raw_element_text: 申报要素整段原文（解析输入 + 证据留存）。
+        decl_brand: 申报品牌（比对基准）。
+        decl_model: 申报型号（比对基准）。
+        evidences: 匹配到的图片证据列表。
+        structure_variant: 来源 Excel 结构变体（供断点指纹与追溯）。
+        source_row: Excel 原始行号（1-based，便于人工回溯）。
+    """
+
+    ticket_no: str = ""
+    part_no: str = ""
+    order_no: str = ""
+    product_name: str = ""
+    seq_no: int = 0
+    raw_element_text: str = ""
+    decl_brand: str = ""
+    decl_model: str = ""
+    evidences: list[ImageEvidence] = dc_field(default_factory=list)
+    structure_variant: StructureVariant = StructureVariant.UNKNOWN
+    source_row: int = 0
+
+    def key(self) -> str:
+        """返回三级索引唯一键（``出货号|料号|订单``）。
+
+        Returns:
+            幂等基础键。
+        """
+        return build_key(self.ticket_no, self.part_no, self.order_no)
+
+    def to_dict(self) -> dict[str, Any]:
+        """序列化为字典。"""
+        return {
+            "ticket_no": self.ticket_no,
+            "part_no": self.part_no,
+            "order_no": self.order_no,
+            "product_name": self.product_name,
+            "seq_no": self.seq_no,
+            "raw_element_text": self.raw_element_text,
+            "decl_brand": self.decl_brand,
+            "decl_model": self.decl_model,
+            "structure_variant": self.structure_variant.value,
+            "source_row": self.source_row,
+            "evidences": [e.to_dict() for e in self.evidences],
+        }
+
+
+@dataclass
+class DifferenceDetail:
+    """单字段差异明细。
+
+    Attributes:
+        field: 字段名（``品牌`` / ``型号``）。
+        declared_value: 申报值。
+        detected_value: 图片识别值。
+        char_diffs: 逐字符差异点列表（SOP 3.4 规则 5：型号不一致必须列出不同点）。
+        note: 补充说明（如"外箱整机品牌，不构成本体证据"）。
+    """
+
+    field: str = ""
+    declared_value: str = ""
+    detected_value: str = ""
+    char_diffs: list[str] = dc_field(default_factory=list)
+    note: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        """序列化为字典。"""
+        return {
+            "field": self.field,
+            "declared_value": self.declared_value,
+            "detected_value": self.detected_value,
+            "char_diffs": list(self.char_diffs),
+            "note": self.note,
+        }
+
+    def summary(self) -> str:
+        """生成人类可读的一行差异描述（用于「差异备注」列）。"""
+        head = f"{self.field}：申报『{self.declared_value}』 vs 图片『{self.detected_value}』"
+        if self.char_diffs:
+            head += "；差异点：" + "".join(self.char_diffs)
+        if self.note:
+            head += f"（{self.note}）"
+        return head
+
+
+@dataclass
+class CheckResult:
+    """单条记录的校验结果（判定引擎输出，UI 与导出共同消费）。
+
+    Attributes:
+        key: 三级索引唯一键（与 :meth:`DeclarationRecord.key` 一致）。
+        record: 源申报记录。
+        verdict: 四类判定之一。
+        detected_brand: 图片识别品牌。
+        detected_model: 图片识别型号。
+        differences: 差异明细列表。
+        evidence_text: 证据文本片段（**不打印完整 OCR 原文**）。
+        image_paths: 涉及的图片路径列表（``;`` 连接供导出）。
+        noise_level: 疑似噪声三态。
+        manually_reviewed: 是否已人工复核。
+        reviewer_note: 复核备注。
+        reason: 判定理由（一句话，进日志 / 汇总表）。
+        evidence_images: 详细证据（图片 + OCR 原文）—— **只进 JSON**。
+        unreachable: **共享盘不可达**结构化标志位（架构设计 13.13.4）。
+            仅当证据中存在 ``ImageEvidence.unreachable == True`` 时置位。
+            **与** ``not_found`` **严格互斥**：目录不存在（``not_found``）只判 🔵，
+            **不置** 本字段。
+            ⚠️ **T05 自动暂停的唯一判据**：条件是「连续 K 条 ``unreachable==True``」；
+            **严禁**改用「连续 K 条 ``NO_IMAGE``」——用户票号填错时会误挂整批。
+    """
+
+    key: str = ""
+    record: DeclarationRecord | None = None
+    verdict: Verdict = Verdict.NO_IMAGE
+    detected_brand: str = ""
+    detected_model: str = ""
+    differences: list[DifferenceDetail] = dc_field(default_factory=list)
+    evidence_text: str = ""
+    image_paths: str = ""
+    noise_level: NoiseLevel = NoiseLevel.DEFINITE_MATCH
+    manually_reviewed: bool = False
+    reviewer_note: str = ""
+    reason: str = ""
+    evidence_images: list[ImageEvidence] = dc_field(default_factory=list)
+    #: 共享盘不可达标志（**不占 13 列**；仅进 ``to_dict``，供 T05 结构化暂停计数）
+    unreachable: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        """序列化为字典（含完整证据，供 JSON 详细日志）。"""
+        return {
+            "key": self.key,
+            "verdict": self.verdict.value,
+            "detected_brand": self.detected_brand,
+            "detected_model": self.detected_model,
+            "differences": [d.to_dict() for d in self.differences],
+            "evidence_text": self.evidence_text,
+            "image_paths": self.image_paths,
+            "noise_level": self.noise_level.value,
+            "manually_reviewed": self.manually_reviewed,
+            "reviewer_note": self.reviewer_note,
+            "reason": self.reason,
+            "record": self.record.to_dict() if self.record is not None else None,
+            "evidence_images": [e.to_dict() for e in self.evidence_images],
+            "unreachable": self.unreachable,
+        }
+
+    def to_row(self) -> list[Any]:
+        """返回 13 列汇总表的一行（**列顺序由 ResultExporter.COLUMNS 决定**）。
+
+        本方法仅按固定顺序拼装值，具体列名由 ``core.result_exporter`` 定义，
+        保持单一事实来源。
+
+        ⚠️ **13 列结构已冻结**（``constants.COLUMNS``，QA 断言恰 13 列）：
+        本方法**不得**因新增字段（如 ``unreachable``）而增列。需要额外信息的字段
+        只进 :meth:`to_dict`（JSON 详细日志），不进汇总表。
+
+        Returns:
+            13 个值的列表（顺序与 ``ResultExporter.COLUMNS`` 严格对应）。
+        """
+        # 延迟 import 避免循环依赖（constants 不依赖 models 的业务类）
+        from core import constants as _C
+
+        record = self.record
+        ticket_no = record.ticket_no if record is not None else ""
+        part_no = record.part_no if record is not None else ""
+        order_no = record.order_no if record is not None else ""
+        product_name = record.product_name if record is not None else ""
+        decl_brand = record.decl_brand if record is not None else ""
+        decl_model = record.decl_model if record is not None else ""
+
+        diff_note = "；".join(d.summary() for d in self.differences) if self.differences else ""
+        if self.reviewer_note:
+            diff_note = (diff_note + "；" if diff_note else "") + f"复核备注：{self.reviewer_note}"
+
+        return [
+            ticket_no,                                # 1  出货通知书号
+            part_no,                                  # 2  成品料号
+            order_no,                                 # 3  订单号
+            product_name,                             # 4  中文品名
+            decl_brand,                               # 5  申报品牌
+            decl_model,                               # 6  申报型号
+            self.detected_brand,                      # 7  图片识别品牌
+            self.detected_model,                      # 8  图片识别型号
+            _C.verdict_text(self.verdict),            # 9  校验结果
+            diff_note,                                # 10 差异备注
+            self.evidence_text,                       # 11 证据（OCR 片段）
+            self.image_paths,                         # 12 图片路径
+            self.reason,                              # 13 判定说明
+        ]
+
+
+@dataclass
+class FieldMapping:
+    """列名 → 内部字段映射（ExcelProbe 产出，对应架构设计 6.2/6.3）。
+
+    Attributes:
+        col_map: ``{内部字段名: Excel 列索引(0-based)}``。
+        header_row: 表头行号（0-based）。
+        ticket_no: 提取到的票号。
+        hit_rate: 图片命中率探针结果（0.0–1.0）。
+        swapped: 是否触发了 ``part_no`` / ``order_no`` 交换自校正（P4 场景）。
+        channel: 命中的映射通道（``literal`` / ``structure`` / ``probe``）。
+        notes: 映射过程中的说明（进日志）。
+    """
+
+    col_map: dict[str, int] = dc_field(default_factory=dict)
+    header_row: int = 0
+    ticket_no: str = ""
+    hit_rate: float = 0.0
+    swapped: bool = False
+    channel: str = "literal"
+    notes: list[str] = dc_field(default_factory=list)
+
+    def resolve(self, field_name: str) -> int:
+        """返回内部字段对应的 Excel 列索引。
+
+        Args:
+            field_name: 内部字段名（如 ``part_no``）。
+
+        Returns:
+            0-based 列索引；未映射返回 ``-1``。
+        """
+        return self.col_map.get(field_name, -1)
+
+    def to_dict(self) -> dict[str, Any]:
+        """序列化为字典。"""
+        return {
+            "col_map": dict(self.col_map),
+            "header_row": self.header_row,
+            "ticket_no": self.ticket_no,
+            "hit_rate": self.hit_rate,
+            "swapped": self.swapped,
+            "channel": self.channel,
+            "notes": list(self.notes),
+        }
+
+
+@dataclass
+class ExcelProbeResult:
+    """Excel 结构探查结果（ExcelProbe 产出）。
+
+    Attributes:
+        variant: 结构变体（A–E）。
+        sheet_name: 选定的要素表 Sheet 名。
+        header_row: 表头行号（0-based）。
+        ticket_no: 票号。
+        mapping: 字段映射。
+        records: 解析出的申报记录列表。
+        notes: 探查说明（进日志）。
+    """
+
+    variant: StructureVariant = StructureVariant.UNKNOWN
+    sheet_name: str = ""
+    header_row: int = 0
+    ticket_no: str = ""
+    mapping: FieldMapping = dc_field(default_factory=FieldMapping)
+    records: list[DeclarationRecord] = dc_field(default_factory=list)
+    notes: list[str] = dc_field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        """序列化为字典（不含 records，避免过大）。"""
+        return {
+            "variant": self.variant.value,
+            "sheet_name": self.sheet_name,
+            "header_row": self.header_row,
+            "ticket_no": self.ticket_no,
+            "mapping": self.mapping.to_dict(),
+            "record_count": len(self.records),
+            "notes": list(self.notes),
+        }
+
+
+@dataclass
+class ParsedElement:
+    """申报要素解析结果（ElementParser 产出）。
+
+    Attributes:
+        brand: 解析出的品牌（``""`` 表示无）。
+        model: 解析出的型号（``""`` 表示无）。
+        fields: 解析出的全部 ``键: 值`` 对（调试 / 证据用）。
+        notes: 解析说明（护栏命中等）。
+    """
+
+    brand: str = ""
+    model: str = ""
+    fields: list[tuple[str, str]] = dc_field(default_factory=list)
+    notes: list[str] = dc_field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        """序列化为字典。"""
+        return {
+            "brand": self.brand,
+            "model": self.model,
+            "fields": [list(pair) for pair in self.fields],
+            "notes": list(self.notes),
+        }
+
+
+@dataclass(frozen=True)
+class Fingerprint:
+    """断点指纹（对应架构设计 12.A.3，防串票）。
+
+    断点与数据源绑定校验的判据集合，**全部满足**才算匹配。
+
+    Attributes:
+        ticket_no: 票号（严格相等）。
+        excel_path: Excel 路径（规范化）。
+        excel_hash: Excel 文件字节 sha256（**首选判据**）。
+        share_root: 图片根目录（规范化）。
+        variant: 结构变体（结构变了则断点不可信）。
+        total_count: 本次预计记录总数。
+    """
+
+    ticket_no: str = ""
+    excel_path: str = ""
+    excel_hash: str = ""
+    share_root: str = ""
+    variant: str = ""
+    total_count: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        """序列化为字典。"""
+        return {
+            "ticket_no": self.ticket_no,
+            "excel_path": self.excel_path,
+            "excel_hash": self.excel_hash,
+            "share_root": self.share_root,
+            "variant": self.variant,
+            "total_count": self.total_count,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Fingerprint:
+        """从字典构造（容忍缺失字段）。"""
+        data = data or {}
+        return cls(
+            ticket_no=str(data.get("ticket_no", "") or ""),
+            excel_path=str(data.get("excel_path", "") or ""),
+            excel_hash=str(data.get("excel_hash", "") or ""),
+            share_root=str(data.get("share_root", "") or ""),
+            variant=str(data.get("variant", "") or ""),
+            total_count=int(data.get("total_count", 0) or 0),
+        )
+
+    def is_same_source(self, other: Fingerprint) -> bool:
+        """判定两个指纹是否指向**同一数据源**（断点可复用）。
+
+        规则（架构设计 12.A.3）：
+          * ``ticket_no`` 严格相等（必查）；
+          * ``excel_hash`` 严格相等（主判据）；若双方 hash 均非空则必查；
+          * ``share_root`` 规范化后相等（必查）；
+          * ``variant`` 相等（必查）。
+
+        Args:
+            other: 当前数据源的指纹。
+
+        Returns:
+            ``True`` 表示断点可复用。
+        """
+        if self.ticket_no != other.ticket_no:
+            return False
+        if self.share_root != other.share_root:
+            return False
+        if self.variant != other.variant:
+            return False
+        if self.excel_hash and other.excel_hash:
+            return self.excel_hash == other.excel_hash
+        # hash 为空时回退到路径比对（记 WARN 由调用方负责）
+        return self.excel_path == other.excel_path
+
+
+@dataclass
+class ResumeSnapshot:
+    """断点快照（``ResumeStore.load_if_match()`` 返回）。
+
+    Attributes:
+        fingerprint: 断点绑定的数据源指纹。
+        done_keys: 已完成的 key 集合。
+        updated_at: 断点最后更新时间（ISO 8601）。
+    """
+
+    fingerprint: Fingerprint = dc_field(default_factory=Fingerprint)
+    done_keys: set[str] = dc_field(default_factory=set)
+    updated_at: str = ""
+
+    @property
+    def done_count(self) -> int:
+        """已完成条数。"""
+        return len(self.done_keys)
+
+    def to_dict(self) -> dict[str, Any]:
+        """序列化为 ``resume.json`` v2 结构。"""
+        return {
+            "schema": 2,
+            "fingerprint": self.fingerprint.to_dict(),
+            "done_keys": sorted(self.done_keys),
+            "updated_at": self.updated_at,
+        }

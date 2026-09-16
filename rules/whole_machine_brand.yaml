@@ -1,0 +1,40 @@
+# 外箱整机品牌上下文词表（SOP 3.5 规则 #8）
+# ⚠️ 口径语义：唛头上的 Brand:Daewoo 伴随这些上下文时，是**整机适配品牌**，
+#    不构成零部件本体品牌证据 → **保留异常**（进人工复核），不得改判合格。
+# ⚠️ 同步关系：context_tokens 须与 core/constants.py 的
+#    DEFAULT_WHOLE_MACHINE_CONTEXT 一致。
+
+# 上下文关键词：OCR 文本中若同时出现「Brand 行」与其中任一 token，
+# 则该 Brand 值判为"整机品牌，不构成本体证据"
+#
+# ⚠️ 裁决（缺陷 A，架构裁决文档第 1 节）：**已移出** `Customermodel` / `Customer model`。
+#    理由：`Customer model` 出现在几乎每张唛头图上，会单独触发整机命中，导致
+#    `is_whole_machine_brand` 频繁误命中（整机命中范围错乱）。SOP 3.5#8 说的是
+#    Brand 行「伴随 `Customermodel`/`CARTON`/`JOBNO` **上下文**」这一「组」，
+#    现由更强的整机信号（`CARTON` / `JOB NO` + `Brand:` 组合）承担命中判定。
+#    `Customer model` 仍作为整机上下文的"追加确认项"存在于 SOP，但不作命中触发项。
+context_tokens:
+  - "Brand:"
+  - "Brand："
+  - "品牌:"
+  - "品牌："
+  - CARTON
+  - JOBNO
+  - JOB NO
+  - 唛头
+
+# 上下文窗口：在 Brand 行前后多少行内搜索 context_tokens（SOP 3.5 规则#2：前后 3 行）
+# ⚠️ 仅当 `context_scope != whole_image` 时生效（向后兼容保留）。
+context_window: 3
+
+# 整机上下文检索范围（缺陷 B 裁决，架构裁决文档第 3 节）：
+#   - `whole_image`（默认）：**同图全文检索**，取消行距限制。
+#     依据：SOP 3.5 规则#8 原文只说"伴随…上下文"（= 同一张唛头上共现），
+#     **没有"3 行"约束**；"前后 3 行"（规则#2）是「取字段值」场景的约束，
+#     误套到「字段间共现」（规则#8）上属跨规则误用。
+#   - 其它值（如 `window`）：退回 `context_window` 邻域检索（旧行为）。
+# ⚠️ 约束：检索范围**必须限定在同一张图内**（不得跨图拼接后检索）。
+context_scope: whole_image
+
+# 命中后的处置（口径不变，仅记录说明）
+verdict_hint: "外箱整机品牌，不构成本体证据"

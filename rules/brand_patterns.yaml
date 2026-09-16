@@ -1,0 +1,55 @@
+# 品牌提取正则形态（SOP 3.5 规则 #6：中文品牌漏提取）
+# 权威载体：新增一种品牌书写形态，只需在此追加正则。
+# ⚠️ 同步关系：none_tokens 须与 core/constants.py 的 DEFAULT_NONE_TOKENS 一致。
+# ⚠️ 口径语义不变（SOP 3.4 补充约定：标签无出口标识 → 视为"无品牌"）。
+
+# 品牌提取正则（**按顺序尝试，先严格后宽松**）
+# 每条：name（唯一标识） / regex（含 1 个捕获组 = 品牌值） / note（说明）
+patterns:
+  - name: ascii_colon
+    # 品牌:COOCAA / 品牌：baori
+    regex: '品牌\s*[:：]\s*([A-Za-z0-9\-\.]+)'
+    note: 品牌 + 冒号（半角或全角）+ ASCII 品牌
+
+  - name: ascii_spaced
+    # Brand:SAMSUNG / BRAND : SAMSUNG
+    regex: '(?:Brand|BRAND)\s*[:：]\s*([A-Za-z0-9\-\.]+)'
+    note: 英文 Brand 标签 + ASCII 品牌
+
+  - name: chinese_colon
+    # 品牌：宇同 / 品牌:宇同
+    regex: '品牌\s*[:：]\s*([\u4e00-\u9fa5]{2,})'
+    note: 品牌 + 冒号 + 中文品牌
+
+  - name: single_char_pai
+    # SAMSUNG牌 —— 单"牌"字格式（SOP 附录 A.3 新增）
+    regex: '([A-Za-z0-9\u4e00-\u9fa5][A-Za-z0-9\u4e00-\u9fa5\-\.]{0,20})牌'
+    note: 品牌值 + "牌"后缀（如 SAMSUNG牌 / 宇同牌）
+
+  - name: chinese_suffix
+    # 宇同品牌 —— 中文品牌 + "品牌"后缀（SOP 附录 A.4 新增）
+    regex: '([\u4e00-\u9fa5]{2,})\s*品牌'
+    note: 中文品牌 + "品牌"后缀（如 宇同品牌）
+
+  - name: bare_ascii_allcaps
+    # 兜底：独立的全大写 ASCII 品牌串（4–20 位），需前置校验避免误捕
+    regex: '(?:^|[\s;；|、])([A-Z][A-Z0-9\-\.]{3,19})(?:$|[\s;；|、])'
+    note: 宽松兜底，命中后仍需经黑名单与"适用于"语境护栏过滤
+
+# 视为"无品牌"的取值（SOP 3.4 补充约定 + 陷阱#7：标签品牌字段留空率极高）
+# 命中 → 判为"无品牌"，不得据此判异常
+# ⚠️ 裁决（缺陷 D，架构裁决文档第 5 节）：**已追加** `无品`。
+#    `无品` 是「无品牌 → 无品」的 OCR 截断残片，语义等同"无品牌"；
+#    依 SOP 3.4 补充约定「标签无出口标识 → 视为无品牌」，必须归入 none_tokens，
+#    否则"申报为无、识别为 无品"会被误判为 ❌（假异常温床）。
+none_tokens:
+  - 无
+  - 无品牌
+  - 空
+  - "N/A"
+  - "NA"
+  - "NONE"
+  - "NULL"
+  - 未标记
+  - 无品
+  - ""

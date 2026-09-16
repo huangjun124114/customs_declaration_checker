@@ -1,0 +1,104 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "customs-declaration-checker"
+# 交付版本号（对外）。与《架构设计》文档版本（v1.2）属不同体系，勿混用。
+version = "0.1.0"
+description = "报关申报要素自动校验桌面工具（品牌/型号 与 产品实拍标签交叉校验）"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [{ name = "Software Development Team" }]
+keywords = ["customs", "ocr", "declaration", "pyside6", "rapidocr"]
+
+# 运行时依赖（与 requirements.txt 保持一致；版本按架构设计 v1.2 第 13.6 节实测锁定）
+dependencies = [
+    "PySide6>=6.9,<6.10",
+    "rapidocr>=3.9,<4.0",
+    "onnxruntime>=1.20,<2.0",
+    "numpy>=2.0,<3.0",
+    "opencv-python-headless>=4.10,<5.0",
+    "Pillow>=11,<13",
+    "openpyxl>=3.1,<4.0",
+    "PyYAML>=6.0",
+    "omegaconf>=2.3,<3.0",
+    "pyclipper>=1.3",
+    "shapely>=2.0",
+    # 传递依赖显式声明（便于 PyInstaller 收集 + check_env 逐项核对）
+    "antlr4-python3-runtime>=4.9",
+    "flatbuffers>=24.0",
+    "requests>=2.31",
+    "certifi>=2024.0",
+    "charset-normalizer>=3.0",
+    "six>=1.15.0",
+    "tqdm>=4.60",
+    "colorlog>=6.0",
+    "colorama>=0.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0,<9.0",
+    "pytest-qt>=4.4",
+    "ruff>=0.5",
+    "pyinstaller>=6.0,<7.0",
+    "pyinstaller-hooks-contrib>=2024.0",
+]
+
+[project.scripts]
+customs-checker = "main:main"
+
+[tool.setuptools]
+# 采用扁平布局：显式声明各顶层包，避免 setuptools 自动发现把 tests/tools 当包
+py-modules = ["main"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["infra*", "core*", "app*", "ui*"]
+exclude = ["tests*", "tools*"]
+
+[tool.setuptools.package-data]
+"*" = ["*.yaml", "*.yml", "*.qss"]
+
+# ─────────────────────────── pytest 配置 ───────────────────────────
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-ra -q"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+markers = [
+    "ocr: 需要真实 OCR 引擎的用例（离线环境可用 mock 后端）",
+    "architecture: 分层架构守卫用例",
+]
+
+# ─────────────────────────── ruff 配置 ───────────────────────────
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["."]
+extend-exclude = ["build", "dist", "tests/fixtures"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+    "W",   # pycodestyle warnings
+]
+ignore = [
+    "E501",  # 行宽由 formatter 控制
+    "B008",  # 允许函数默认值调用（Qt 常见模式）
+    "UP042",  # 保留 (str, Enum) 而非 StrEnum：需兼容 str(x) 与 JSON 序列化语义
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]

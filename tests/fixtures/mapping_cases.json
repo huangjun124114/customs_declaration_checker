@@ -1,0 +1,169 @@
+{
+  "_comment": "字段映射回归集（T02）。覆盖变体 A–E 与 P4 交叉场景（列名语义与数据语义相反）。规则外置（v1.1 C.4）：参数化断言外置前后一致。",
+  "sample_excel": {
+    "path": "原始输入/申报要素-SA26090215委内瑞拉.XLSX",
+    "expect_variant": "D",
+    "expect_sheet_name": "Sheet2",
+    "expect_header_row": 1,
+    "expect_header_row_1based": 2,
+    "expect_ticket_no": "SA26090215",
+    "trap_sheet": "Sheet1",
+    "trap_sheet_has_ticket_column": true,
+    "expect_record_count": 18
+  },
+
+  "header_cases": [
+    {
+      "name": "variant_d_element_sheet_header",
+      "rule": "变体 D 要素表表头（Sheet2 R2）",
+      "headers": ["序号", "物料编号", "订单号", "名称", "数量", "重量", "", "申报要素"],
+      "expect_element_col": 7,
+      "expect_part_col_by_name": 1,
+      "expect_order_col_by_name": 2,
+      "expect_matches_element_and_part": true
+    },
+    {
+      "name": "trap_sheet1_box_detail_header",
+      "rule": "陷阱 Sheet1 箱明细表头（含票号列但无申报要素列）→ 不得被选为要素表",
+      "headers": ["选择", "订舱号", "出货通知书号", "柜号", "柜型", "封条号", "TARE", "车牌", "运输公司", "订单号"],
+      "expect_matches_element_and_part": false,
+      "expect_score_zero": true
+    },
+    {
+      "name": "variant_a_old_header",
+      "rule": "变体 A 老结构（首行即表头）",
+      "headers": ["出货通知书号", "物料编号", "订单号", "名称", "申报要素"],
+      "expect_element_col": 4,
+      "expect_part_col_by_name": 1,
+      "expect_order_col_by_name": 2,
+      "expect_matches_element_and_part": true
+    },
+    {
+      "name": "variant_e_no_order_col",
+      "rule": "变体 E：无订单号列（仅料号 + 申报要素）",
+      "headers": ["序号", "成品料号", "名称", "申报要素"],
+      "expect_element_col": 3,
+      "expect_part_col_by_name": 1,
+      "expect_has_order_col": false,
+      "expect_matches_element_and_part": true
+    },
+    {
+      "name": "element_col_with_trailing_space",
+      "rule": "列名变体：「申报要素 」带尾空格须能命中（strip 后匹配）",
+      "headers": ["序号", "物料编号", "订单号", "名称", "申报要素 "],
+      "expect_element_col": 4,
+      "expect_matches_element_and_part": true
+    }
+  ],
+
+  "p4_cases": [
+    {
+      "name": "p4_literal_mapping_mismatch",
+      "rule": "P4：按列名『字面语义』误配（columns 被语义反置：把『物料编号』的列当成 order_no、把『订单号』的列当成 part_no）→ 干跑命中率应为 0（全票失配）",
+      "headers": ["序号", "物料编号", "订单号", "名称", "申报要素"],
+      "literal_col_map": {"part_no": 2, "order_no": 1},
+      "rows": [
+        ["1", "N011901-007386-001", "2660326M", "FFC线材", "品牌:baori"],
+        ["2", "N011901-007957-001", "2660328M", "FFC线材", "品牌:无"],
+        ["3", "N011901-009350-001", "2660310M", "FFC线材", "无品牌"]
+      ],
+      "image_tokens": [
+        {"order": "2660326M", "part": "N011901-007386-001"},
+        {"order": "2660328M", "part": "N011901-007957-001"},
+        {"order": "2660310M", "part": "N011901-009350-001"}
+      ],
+      "expect_literal_hit_rate": 0.0,
+      "expect_swap_needed": true
+    },
+    {
+      "name": "p4_structure_inversion_correct",
+      "rule": "P4：结构反推映射（order_no←列2, part_no←列1）干跑 → 命中率 100%",
+      "headers": ["序号", "物料编号", "订单号", "名称", "申报要素"],
+      "struct_col_map": {"part_no": 1, "order_no": 2},
+      "rows": [
+        ["1", "N011901-007386-001", "2660326M", "FFC线材", "品牌:baori"],
+        ["2", "N011901-007957-001", "2660328M", "FFC线材", "品牌:无"],
+        ["3", "N011901-009350-001", "2660310M", "FFC线材", "无品牌"]
+      ],
+      "image_tokens": [
+        {"order": "2660326M", "part": "N011901-007386-001"},
+        {"order": "2660328M", "part": "N011901-007957-001"},
+        {"order": "2660310M", "part": "N011901-009350-001"}
+      ],
+      "expect_hit_rate": 1.0
+    },
+    {
+      "name": "p4_probe_auto_swap",
+      "rule": "P4：列名映射（part_no←列0[料号式短码], order_no←列1[三段式料号]）语义相反 → 命中率 0 → 探针自动交换 → 命中率 100% → swapped=True",
+      "headers": ["物料编号", "订单号", "申报要素"],
+      "rows": [
+        ["2660326M", "N011901-007386-001", "品牌:baori"],
+        ["2660328M", "N011901-007957-001", "品牌:无"],
+        ["2660310M", "N011901-009350-001", "无品牌"]
+      ],
+      "image_tokens": [
+        {"order": "2660326M", "part": "N011901-007386-001"},
+        {"order": "2660328M", "part": "N011901-007957-001"},
+        {"order": "2660310M", "part": "N011901-009350-001"}
+      ],
+      "expect_swapped": true,
+      "expect_final_hit_rate": 1.0
+    }
+  ],
+
+  "filename_cases": [
+    {
+      "name": "standard_filename",
+      "filename": "2660326M&N011901-007386-001&001.jpg",
+      "expect_a": "2660326M",
+      "expect_b": "N011901-007386-001",
+      "expect_c": "001"
+    },
+    {
+      "name": "seq_gap_not_assumed_continuous",
+      "filename": "2660310M&N030107-003211-001&008.jpg",
+      "expect_a": "2660310M",
+      "expect_b": "N030107-003211-001",
+      "expect_c": "008",
+      "note": "实测 P7：序号跳号（缺 &007），解析不得假设连续"
+    },
+    {
+      "name": "malformed_filename",
+      "filename": "料号 (1).png",
+      "expect_a": "",
+      "expect_b": "",
+      "expect_c": "",
+      "note": "非标文件名 → 返回空三元组（不抛异常）"
+    }
+  ],
+
+  "ticket_cases": [
+    {
+      "name": "ticket_with_colon",
+      "texts": ["出货通知书号:SA26090215"],
+      "expect": "SA26090215"
+    },
+    {
+      "name": "ticket_no_colon_missing_shu",
+      "texts": ["出货通知号SA26090215"],
+      "expect": "SA26090215",
+      "note": "实测 P2：缺「书」字 + 无冒号"
+    },
+    {
+      "name": "ticket_with_space",
+      "texts": ["出货通知书号 SA26090215"],
+      "expect": "SA26090215"
+    },
+    {
+      "name": "ticket_fullwidth_colon",
+      "texts": ["出货通知书号：SA26090215"],
+      "expect": "SA26090215"
+    },
+    {
+      "name": "ticket_missing",
+      "texts": ["序号", "物料编号", "订单号"],
+      "expect": "",
+      "note": "提取不到 → 空串（由上层要求用户手填，Q9）"
+    }
+  ]
+}

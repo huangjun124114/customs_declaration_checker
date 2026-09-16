@@ -1,0 +1,54 @@
+# ─────────────────────────────────────────────────────────────
+#  报关申报要素自动校验工具 · .gitignore
+#  提交前请确认：不得把「原始输入」与运行期产物纳入版本库
+# ─────────────────────────────────────────────────────────────
+
+# ── Python 字节码与构建产物 ──
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+
+# ── 测试 / 静态检查缓存 ──
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# ── 项目空间运行期产物（SOP 2.4 三条铁律：产物不入库）──
+#    ⚠️ 原始输入 = 只读红线 + 可能含业务数据，**永不入库**
+原始输入/
+成果产出/
+过程产出/
+resume_*.json
+校验运行日志_*.log
+*.log
+
+# ── 本机调试残留（非源码，禁止入库）──
+.p2_env.txt
+.p2_out.txt
+.lscheck.txt
+_f_err.txt
+_*.py
+_*.txt
+_*.json
+_*.xml
+
+# ── PyInstaller ──
+*.spec.bak
+
+# ── IDE / 编辑器 ──
+.idea/
+.vscode/
+*.swp
+*~

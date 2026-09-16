@@ -1,0 +1,12 @@
+# ── 报关申报要素自动校验工具 · 开发/打包依赖（requirements-dev.txt）──
+# 架构设计 v1.2 第 13.6 节
+# 安装：pip install --no-cache-dir -r requirements-dev.txt
+#   ⚠️ 同样禁止 --no-deps；必须用 --no-cache-dir
+
+-r requirements.txt
+
+pytest>=8.0,<9.0                       # 回归测试（SOP Phase 2 强制要求）
+pytest-qt>=4.4                         # Qt 组件测试（可选）
+ruff>=0.5                              # 静态检查
+pyinstaller>=6.0,<7.0                  # 单文件 exe 打包
+pyinstaller-hooks-contrib>=2024.0      # onnxruntime/opencv 打包钩子

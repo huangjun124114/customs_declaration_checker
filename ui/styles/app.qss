@@ -1,0 +1,132 @@
+/* 报关申报要素自动校验工具 —— 全局样式（ui/styles/app.qss）
+ *
+ * 设计约束（架构 12.A / 12.B）：
+ *   - 断点提示 QLabel#breakpointHint 必须是红色（#D32F2F），且仅在「未完成断点」时显字；
+ *   - 三区卡片化：「数据源」「进度日志」「结果总览」三块独立白卡；
+ *   - 四类判定徽标用内联色（见 palette.py VERDICT_COLORS），此处只做骨架。
+ *
+ * 注意：Qt 的 QSS 不支持 CSS 变量，颜色在此逐字写死。
+ */
+
+QMainWindow {
+    background: #F5F6F8;
+}
+
+QWidget {
+    font-family: "Microsoft YaHei", "微软雅黑", "Segoe UI", sans-serif;
+    font-size: 13px;
+    color: #303133;
+}
+
+/* ── 卡片容器 ── */
+QFrame#zoneCard {
+    background: #FFFFFF;
+    border: 1px solid #DCDFE6;
+    border-radius: 8px;
+}
+
+QLabel#zoneTitle {
+    font-size: 14px;
+    font-weight: bold;
+    color: #303133;
+    padding: 2px 0;
+}
+
+QLabel#fieldLabel {
+    color: #606266;
+}
+
+/* ── 断点提示（红色，仅在未完成断点时显示文字）── */
+QLabel#breakpointHint {
+    color: #D32F2F;
+    font-weight: bold;
+    padding: 4px 0;
+}
+
+/* ── 汇总四卡 ── */
+QFrame#countCard {
+    background: #FAFAFA;
+    border: 1px solid #E4E7ED;
+    border-radius: 6px;
+}
+QLabel#countCardValue {
+    font-size: 22px;
+    font-weight: bold;
+}
+QLabel#countCardTitle {
+    color: #909399;
+    font-size: 12px;
+}
+
+/* ── 按钮 ── */
+QPushButton {
+    background: #FFFFFF;
+    border: 1px solid #DCDFE6;
+    border-radius: 6px;
+    padding: 6px 14px;
+    min-height: 20px;
+}
+QPushButton:hover {
+    border-color: #1565C0;
+    color: #1565C0;
+}
+QPushButton:disabled {
+    color: #C0C4CC;
+    border-color: #EBEEF5;
+    background: #F5F7FA;
+}
+QPushButton#primaryButton {
+    background: #1565C0;
+    color: #FFFFFF;
+    border: 1px solid #1565C0;
+    font-weight: bold;
+}
+QPushButton#primaryButton:hover {
+    background: #1976D2;
+}
+QPushButton#primaryButton:disabled {
+    background: #A0C0E0;
+    border-color: #A0C0E0;
+    color: #FFFFFF;
+}
+
+/* ── 日志表（级别着色由 QColor 内联，不在此处）── */
+QPlainTextEdit#logView {
+    background: #1E1E1E;
+    color: #D4D4D4;
+    border: 1px solid #DCDFE6;
+    border-radius: 6px;
+    font-family: "Consolas", "Cascadia Mono", monospace;
+    font-size: 12px;
+}
+
+/* ── 进度条 ── */
+QProgressBar {
+    border: 1px solid #DCDFE6;
+    border-radius: 6px;
+    background: #F5F7FA;
+    text-align: center;
+    height: 18px;
+}
+QProgressBar::chunk {
+    background: #1565C0;
+    border-radius: 5px;
+}
+
+/* ── 复核工作台：证据列表 / 图片查看区 ── */
+QListWidget#evidenceList {
+    background: #FFFFFF;
+    border: 1px solid #DCDFE6;
+    border-radius: 6px;
+}
+QLabel#imageStage {
+    background: #2B2B2B;
+    color: #909399;
+    border: 1px solid #DCDFE6;
+    border-radius: 6px;
+}
+
+/* ── 复核留痕说明 ── */
+QLabel#reviewHint {
+    color: #909399;
+}

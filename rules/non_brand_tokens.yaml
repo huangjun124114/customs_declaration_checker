@@ -1,0 +1,61 @@
+# 非品牌裸 token 词表（缺陷 C 裁决，架构裁决文档 4.3 / 6.3）
+# ──────────────────────────────────────────────────────────────────────
+# 用途：图片侧「裸 token 行」提取品牌时，这些 token **不得**被当作品牌值。
+#   * 单位 / 通用词：`MADE IN CHINA` / `RoHS` / `REACH` / `QTY` / `PCS`
+#   * 元件厂标 / PCB 丝印残片：`NFK` / `SAMYOUNG` / `SMT` / `ONEL` / `CONGO` 等
+#   * 应用图标名：`prime video` / `YouTube` / `NETFLIX`
+#   * 电池型号单位：`AAA` / `UM-4`
+#
+# ⚠️ 权威载体：本文件。`core/judge_engine.py` 的 `_NON_BRAND_BARE_TOKENS` 仅在
+#    **本 YAML 缺失**时作兜底常量，**不作权威载体**（"规则解耦"硬约束）。
+# ⚠️ 同步关系：本文件内容须与 `core/constants.py` 的 `DEFAULT_NON_BRAND_TOKENS`
+#    保持一致，由 `tests/test_rule_repository.py` 断言（防两处漂移）。
+# ⚠️ 口径语义不变：本文件只提供"什么不算品牌"的实现条目，
+#    不新增/不改写任何 SOP 判定口径。
+tokens:
+  # ── 整机上下文类（同 context_tokens，避免被当裸品牌）──
+  - CARTON
+  - JOBNO
+  - JOBNO.
+  - "JOB NO"
+  # ── 单位 / 通用词 ──
+  - QTY
+  - MADE
+  - "MADE IN CHINA"
+  - CHINA
+  - ORIGIN
+  - CODE
+  - DATE
+  - MODEL
+  - BRAND
+  - PCS
+  - CTN
+  - SPARE
+  - PARTS
+  - TOTAL
+  - REMARKS
+  - DESCRIPTION
+  # ── 合规标识 ──
+  - REACH
+  - RoHS
+  # ── 电池型号单位（实测 seq=16/17/18：`AAA UM-4`）──
+  - AAA
+  - UM-4
+  # ── 应用图标名（实测 seq=16/17/18：`prime video` / `YouTube` / `NETFLIX`）──
+  - prime
+  - video
+  - YouTube
+  - NETFLIX
+  # ── 元件厂标 / PCB 丝印残片（实测 seq=11/13）──
+  - NFK
+  - SAMYOUNG
+  - SMT
+  - DIP
+  - ONEL
+  - WLO
+  - CONGO
+  - ZCT
+  - VBL
+  - HOT
+  - COLD
+  - SPDFOUT
