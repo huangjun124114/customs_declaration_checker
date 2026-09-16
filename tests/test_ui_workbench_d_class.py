@@ -1,4 +1,4 @@
-"""批次 3-B：人工复核工作台 D 类（点 9.1–9.4）+ 票号纠正入口（P2-2）。
+"""人工复核工作台 D 类回归 + v0.3.0 工作台重构验收。
 
 在 ``QT_QPA_PLATFORM=offscreen`` 下用**夹具构造的 CheckResult**（不跑真实跑批）
 验证纯 UI 行为：
@@ -6,12 +6,15 @@
   * **9.1 拖动平移**：``setWidgetResizable(False)``；放大超出视口后
     ``horizontalScrollBar().maximum() > 0``（原缺陷下为 0）；左键拖拽改变滚动值；
     抓手光标**仅在溢出时**出现；``Ctrl + 滚轮`` 缩放保留。
-  * **9.2 只显当前图**：带 3 张图的记录，切换后 ``evidence_view`` **只含当前图**文本
+  * **9.2 只显当前图**：带 3 张图的记录，切换后散行区**只含当前图**文本
     （可证伪回归锁：原缺陷下会拼接全部 3 张）。
-  * **9.3 四段式判定链路**：① 申报要素 / ② 图片识别（+ 证据来源）/ ③ 判定原因
-    （逐字符差异）/ ④ 判定结果 —— 四段均有内容。
-  * **9.4 KV 展示**：有 KV → 表格出行（键/值/置信度）；无 KV → 进散行标签卡；
-    原文可折叠。
+  * **需求 5 判定链路三列**：``要素 | 申报值 | 判定值``，「判定值」取引擎回吐的
+    ``TokenMatch``（EXACT/FUZZY/NONE 三分支 + 旧链路回退）。
+  * **需求 7 全散行**：废弃 KV 表格，当前图 OCR 全部行走散行标签卡。
+  * **需求 8 原始 OCR 弹窗**：单例、非模态、**不遮挡图片区**（``overlap_with`` 断言）。
+  * **需求 2 图片旋转**：左旋 / 右旋 90°、四步回原位、换图复位、旋转后尺寸基准跟随。
+  * **需求 3 + 4 记录区**：表格三列、5 个状态标签（带数量）、三字段模糊搜索、
+    选中行同步中/右区。
   * **P2-2 票号纠正入口**：只读标签旁的「改」按钮弹 ``QInputDialog``，改完刷新；
     取消 / 留空不改；运行期置灰。
 
@@ -40,6 +43,7 @@ from core.models import (  # noqa: E402
     OcrText,
     Verdict,
 )
+from core.token_matcher import MATCH_EXACT, MATCH_FUZZY, MATCH_NONE, TokenMatch  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -267,22 +271,38 @@ def test_ctrl_wheel_zoom_preserved(qapp, tmp_path) -> None:
 # ══════════════════════════════════════════════════════════════════
 
 
-def test_evidence_view_only_current_image(qapp) -> None:
+def _flow_text(layout) -> str:
+    """把 FlowLayout 中标签卡的文本拼成一段（供「只显当前图」类断言）。"""
+    texts: list[str] = []
+    for idx in range(layout.count()):
+        item = layout.itemAt(idx)
+        widget = item.widget() if item is not None else None
+        if widget is not None and hasattr(widget, "text"):
+            texts.append(widget.text())
+    return "\n".join(texts)
+
+
+def _card_text(card) -> str:
+    """读取卡片散行区（``line_flow``）的全部文本。"""
+    return _flow_text(card.line_flow)
+
+
+def test_line_flow_only_current_image(qapp) -> None:
     """9.2 可证伪回归锁：默认只显第 1 张图 OCR，不含另两张文本。"""
     card = _card(qapp)
     card.load_result(_three_image_result())
-    text = card.evidence_view.toPlainText()
+    text = _card_text(card)
     assert "AAA-BRAND-TEXT" in text
     assert "BBB-MODEL-TEXT" not in text
     assert "CCC-RESIDUE-TEXT" not in text
 
 
-def test_switch_image_updates_evidence_view(qapp) -> None:
-    """9.2：切到第 2 张图后，evidence_view 只含第 2 张文本（不含第 1、3 张）。"""
+def test_switch_image_updates_line_flow(qapp) -> None:
+    """9.2：切到第 2 张图后，散行区只含第 2 张文本（不含第 1、3 张）。"""
     card = _card(qapp)
     card.load_result(_three_image_result())
     card.set_current_image("C:/img/2.jpg")
-    text = card.evidence_view.toPlainText()
+    text = _card_text(card)
     assert "BBB-MODEL-TEXT" in text
     assert "AAA-BRAND-TEXT" not in text
     assert "CCC-RESIDUE-TEXT" not in text
@@ -314,134 +334,245 @@ def test_workbench_evidence_selected_syncs_card(qapp) -> None:
 
     session = AppSession()
     result = _three_image_result()
-    result.verdict = Verdict.NO_MARK  # 工作台默认只列待复核（⚠️/🔵）记录
+    result.verdict = Verdict.NO_MARK
     session.replace([result], ticket_no="SA26090215")
     workbench = ReviewWorkbench(session)
     workbench._on_evidence_selected("C:/img/2.jpg")  # noqa: SLF001
-    assert "BBB-MODEL-TEXT" in workbench.card.evidence_view.toPlainText()
+    assert "BBB-MODEL-TEXT" in _card_text(workbench.card)
 
 
 # ══════════════════════════════════════════════════════════════════
-#  9.3 四段式判定链路
+#  需求 5：判定链路三列（要素 / 申报值 / 判定值）
 # ══════════════════════════════════════════════════════════════════
 
 
-def test_chain_declared_section_has_content(qapp) -> None:
-    """9.3 ① 申报要素：品牌 / 型号来自 record.decl_*。"""
+def _result_with_matches(
+    brand_match: TokenMatch | None = None,
+    model_match: TokenMatch | None = None,
+) -> CheckResult:
+    """在基础夹具上挂 ``token_matches``（模拟引擎回吐）。"""
+    result = _three_image_result()
+    matches: list[TokenMatch] = []
+    if brand_match is not None:
+        matches.append(brand_match)
+    if model_match is not None:
+        matches.append(model_match)
+    result.token_matches = matches
+    return result
+
+
+def test_chain_table_has_three_columns_two_rows(qapp) -> None:
+    """需求 5：判定链路为「要素 | 申报值 | 判定值」3 列 × 2 行（品牌 / 型号）。"""
     card = _card(qapp)
     card.load_result(_three_image_result())
-    text = card.chain_labels["decl"].text()
-    assert "申报要素" in text
+    assert card.chain_table.columnCount() == 3
+    assert card.chain_table.rowCount() == 2
+    headers = [
+        card.chain_table.horizontalHeaderItem(col).text()
+        for col in range(card.chain_table.columnCount())
+    ]
+    assert headers == ["要素", "申报值", "判定值"]
+    assert card.chain_table.item(0, 0).text() == "品牌"
+    assert card.chain_table.item(1, 0).text() == "型号"
+
+
+def test_chain_declared_column_shows_declared_values(qapp) -> None:
+    """需求 5：中间列取 ``record.decl_brand`` / ``decl_model``。"""
+    card = _card(qapp)
+    card.load_result(_three_image_result())
+    assert card.chain_table.item(0, 1).text() == "baori"
+    assert card.chain_table.item(1, 1).text() == "A7A01G"
+
+
+def test_chain_declared_column_shows_dash_when_absent(qapp) -> None:
+    """需求 5：申报值为空 → 显示「（无）」。"""
+    card = _card(qapp)
+    result = _three_image_result()
+    result.record.decl_brand = ""
+    card.load_result(result)
+    assert card.chain_table.item(0, 1).text() == "（无）"
+
+
+def test_chain_judge_exact_hit_shows_token_and_images(qapp) -> None:
+    """需求 5 + 遗留 #3：EXACT 命中 → 显示命中 token 与**引擎回吐的真实图号**。"""
+    card = _card(qapp)
+    result = _result_with_matches(
+        TokenMatch(
+            field="品牌",
+            declared="baori",
+            mode=MATCH_EXACT,
+            token="baori",
+            images=[2],
+            sample_line="baori E339609 AWM 20941",
+        )
+    )
+    card.load_result(result)
+    text = card.chain_table.item(0, 2).text()
+    assert "✅" in text
+    assert "完整分词" in text
     assert "baori" in text
-    assert "A7A01G" in text
+    assert "图 2" in text
 
 
-def test_chain_detected_section_has_content(qapp) -> None:
-    """9.3 ② 图片识别：来自 detected_*（跨图投票结果）。"""
+def test_chain_judge_fuzzy_hit_marks_correction(qapp) -> None:
+    """需求 5：FUZZY 命中 → 必须标注「OCR 疑似误读，已纠正」（可追溯）。"""
     card = _card(qapp)
-    card.load_result(_three_image_result())
-    text = card.chain_labels["detected"].text()
-    assert "图片识别" in text
+    result = _result_with_matches(
+        TokenMatch(
+            field="品牌",
+            declared="baori",
+            mode=MATCH_FUZZY,
+            token="baori",
+            images=[1],
+            corrected_from="boori",
+        )
+    )
+    card.load_result(result)
+    text = card.chain_table.item(0, 2).text()
+    assert "✅" in text
+    assert "boori" in text
+    assert "已纠正" in text
+
+
+def test_chain_judge_none_with_detected_shows_fail(qapp) -> None:
+    """需求 5：未命中但图内有同类标识 → ❌ 并列出图内实际值（两级分流之一）。"""
+    card = _card(qapp)
+    result = _result_with_matches(
+        TokenMatch(field="品牌", declared="baori", mode=MATCH_NONE, note="未出现完整分词")
+    )
+    card.load_result(result)
+    text = card.chain_table.item(0, 2).text()
+    assert "❌" in text
     assert "Daewoo" in text
-    assert "HS-8AA" in text
+
+
+def test_chain_judge_none_without_detected_shows_no_mark(qapp) -> None:
+    """需求 5：未命中且图内无同类标识 → ⚠️ 缺图内标识（两级分流之二，严禁 ❌）。"""
+    card = _card(qapp)
+    result = _result_with_matches(
+        TokenMatch(field="品牌", declared="baori", mode=MATCH_NONE, note="未出现完整分词")
+    )
+    result.detected_brand = ""
+    card.load_result(result)
+    text = card.chain_table.item(0, 2).text()
+    assert "⚠️" in text
+    assert "❌" not in text
+
+
+def test_chain_judge_voided_hit_explains_guard(qapp) -> None:
+    """需求 5 + 不虚高：命中被字段名护栏作废 → 原样展示原因（不静默）。"""
+    card = _card(qapp)
+    note = "品牌：『创维』仅出现在字段名语境（如『创维物料编号』），不构成值证据，命中作废"
+    result = _result_with_matches(
+        TokenMatch(field="品牌", declared="创维", mode=MATCH_NONE, note=note)
+    )
+    result.detected_brand = ""
+    card.load_result(result)
+    text = card.chain_table.item(0, 2).text()
+    assert "⚠️" in text
+    assert "命中作废" in text
+
+
+def test_chain_judge_declared_none_token(qapp) -> None:
+    """需求 5：申报值为「无」→ 明确标注未参与匹配（不得显示为命中/失败）。"""
+    card = _card(qapp)
+    result = _result_with_matches(
+        TokenMatch(field="品牌", declared="无", mode=MATCH_NONE, note="申报值为『无』")
+    )
+    card.load_result(result)
+    text = card.chain_table.item(0, 2).text()
+    assert "申报为无" in text
+    assert "✅" not in text
+
+
+def test_chain_judge_falls_back_to_legacy_detected(qapp) -> None:
+    """需求 5 回退：无 ``token_matches``（旧结果集）→ 显示 detected_* 并标注旧链路。"""
+    card = _card(qapp)
+    card.load_result(_three_image_result())  # 该夹具未挂 token_matches
+    text = card.chain_table.item(0, 2).text()
+    assert "Daewoo" in text
+    assert "旧链路" in text
+
+
+def test_chain_judge_cell_tooltip_is_traceable(qapp) -> None:
+    """需求 5 可追溯：判定值单元格 tooltip 含命中方式 / 原文行。"""
+    card = _card(qapp)
+    result = _result_with_matches(
+        TokenMatch(
+            field="品牌",
+            declared="baori",
+            mode=MATCH_EXACT,
+            token="baori",
+            images=[2],
+            sample_line="baori E339609",
+            note="品牌：图片中以完整分词命中『baori』（图 2）",
+        )
+    )
+    card.load_result(result)
+    tooltip = card.chain_table.item(0, 2).toolTip()
+    assert "命中方式：EXACT" in tooltip
+    assert "baori E339609" in tooltip
 
 
 def test_chain_reason_section_lists_char_diffs(qapp) -> None:
-    """9.3 ③ 判定原因：含差异字段与逐字符差异点。"""
+    """判定原因：含差异字段与逐字符差异点。"""
     card = _card(qapp)
     card.load_result(_three_image_result())
-    text = card.chain_labels["reason"].text()
+    text = card.chain_reason.text()
     assert "判定原因" in text
     assert "品牌" in text
     assert "b→D" in text
 
 
 def test_chain_verdict_section_has_content(qapp) -> None:
-    """9.3 ④ 判定结果：含四类判定字符串（口径逐字）。"""
+    """判定结果：含四类判定字符串（口径逐字）。"""
     card = _card(qapp)
     card.load_result(_three_image_result())
-    text = card.chain_labels["verdict"].text()
+    text = card.chain_verdict.text()
     assert "判定结果" in text
     assert VERDICT_FAIL in text
 
 
 def test_chain_reason_falls_back_to_reason_text(qapp) -> None:
-    """9.3 ③：无差异明细时回退到 result.reason。"""
+    """判定原因：无差异明细时回退到 ``result.reason``。"""
     card = _card(qapp)
     result = _three_image_result()
     result.differences = []
     result.reason = "申报缺失但图片明确有"
     card.load_result(result)
-    assert "申报缺失但图片明确有" in card.chain_labels["reason"].text()
+    assert "申报缺失但图片明确有" in card.chain_reason.text()
 
 
-def test_chain_brand_source_hint_lists_images(qapp) -> None:
-    """9.3 ②：品牌证据来源（best-effort）能列出含该品牌的图号。"""
+def test_no_legacy_brand_source_hint(qapp) -> None:
+    """v0.3 遗留 #3 闭环：UI 侧「文本包含」近似推断函数已删除（改由引擎回吐）。"""
     card = _card(qapp)
-    result = _three_image_result()
-    result.evidence_images[0].ocr = _ocr("Daewoo AAA")
-    result.evidence_images[1].ocr = _ocr("Daewoo BBB")
-    result.evidence_images[2].ocr = _ocr("CCC")
-    card.load_result(result)
-    text = card.chain_labels["detected"].text()
-    assert "图1" in text
-    assert "2 张图" in text
-
-
-def test_chain_brand_source_hint_marks_missing(qapp) -> None:
-    """9.3 ②：推断不出证据来源时显式标注「未记录」（绝不臆造）。"""
-    card = _card(qapp)
-    result = _three_image_result()
-    result.detected_brand = "NoSuchBrand"
-    card.load_result(result)
-    assert "证据来源未记录" in card.chain_labels["detected"].text()
+    assert not hasattr(card, "_brand_source_hint")
 
 
 # ══════════════════════════════════════════════════════════════════
-#  9.4 KV 表格 + 散行标签卡 + 折叠原文
+#  需求 7 + 8：全散行文本 + 原始 OCR 弹窗
 # ══════════════════════════════════════════════════════════════════
 
 
-def test_kv_table_rows_when_kv_present(qapp) -> None:
-    """9.4 主区：有键值对 → 表格按行展示（键 / 值 / 置信度）。"""
+def test_no_kv_table_widget(qapp) -> None:
+    """需求 7：KV 表格已删除（不再以键值对齐方式呈现）。"""
     card = _card(qapp)
-    card.load_result(_three_image_result())  # 当前图 = 图1，kv={"Brand": "Daewoo"}
-    assert card.kv_table.rowCount() == 1
-    assert card.kv_table.item(0, 0).text() == "Brand"
-    assert card.kv_table.item(0, 1).text() == "Daewoo"
+    assert not hasattr(card, "kv_table")
+    assert not hasattr(card, "_kv_rows")
+    assert not hasattr(card, "_line_key")
 
 
-def test_kv_table_confidence_from_line_scores(qapp) -> None:
-    """9.4 主区：置信度列取对应行分数（92%）。"""
+def test_no_duplicate_text_widgets(qapp) -> None:
+    """需求 8：重复的「当前图 OCR 文本」与内嵌折叠区均已删除，只留一个弹窗入口。"""
     card = _card(qapp)
-    result = _three_image_result()
-    result.evidence_images[0].ocr = _ocr(
-        "Brand:Daewoo", kv={"Brand": "Daewoo"}, line_scores=[0.92]
-    )
-    card.load_result(result)
-    assert card.kv_table.item(0, 2).text() == "92%"
+    assert not hasattr(card, "evidence_view")
+    assert not hasattr(card, "raw_toggle")
+    assert not hasattr(card, "raw_view")
+    assert card.btn_view_ocr.text() == "查看原始 OCR 文本"
 
 
-def test_kv_table_empty_when_no_kv(qapp) -> None:
-    """9.4：当前图无键值对 → KV 表无行。"""
-    card = _card(qapp)
-    card.load_result(_three_image_result())
-    card.set_current_image("C:/img/3.jpg")  # 该图 kv 为空
-    assert card.kv_table.rowCount() == 0
-
-
-def test_residue_label_cards_when_no_kv(qapp) -> None:
-    """9.4 副区：无键值对时，每条散行进一个标签卡。"""
-    card = _card(qapp)
-    result = _three_image_result()
-    result.evidence_images[2].ocr = _ocr("LINE-ONE\nLINE-TWO\nLINE-THREE")
-    card.load_result(result)
-    card.set_current_image("C:/img/3.jpg")
-    assert card.residue_flow.count() == 3
-
-
-def test_residue_excludes_kv_lines(qapp) -> None:
-    """9.4 副区：已成 KV 的行不进散行标签卡。"""
+def test_line_flow_keeps_kv_lines(qapp) -> None:
+    """需求 7：散行区取 ``ocr.lines()`` **全量行**，不再剔除已成键值对的行。"""
     card = _card(qapp)
     result = _three_image_result()
     result.evidence_images[0].ocr = _ocr(
@@ -449,43 +580,53 @@ def test_residue_excludes_kv_lines(qapp) -> None:
         kv={"Brand": "Daewoo", "Model": "HS-8AA"},
     )
     card.load_result(result)
-    assert card.residue_flow.count() == 1
-    only = card.residue_flow.itemAt(0).widget()
-    assert only.text() == "MADE IN CHINA"
+    assert card.line_flow.count() == 3
+    texts = [card.line_flow.itemAt(i).widget().text() for i in range(3)]
+    assert "Brand:Daewoo" in texts
+    assert "Model:HS-8AA" in texts
 
 
-def test_raw_text_toggle_collapsed_by_default(qapp) -> None:
-    """9.4 折叠区：原文默认隐藏。"""
+def test_line_flow_empty_hint(qapp) -> None:
+    """需求 7：当前图无识别文本 → 显示空态提示（而非空白）。"""
     card = _card(qapp)
-    card.load_result(_three_image_result())
-    assert card.raw_view.isHidden() is True
-    assert card.raw_toggle.isChecked() is False
+    result = _three_image_result()
+    result.evidence_images[0].ocr = _ocr("")
+    card.load_result(result)
+    assert card.line_flow.count() == 1
+    assert "本图无识别文本" in card.line_flow.itemAt(0).widget().text()
 
 
-def test_raw_text_toggle_shows_original(qapp) -> None:
-    """9.4 折叠区：展开后显示当前图原始 OCR 全文。"""
+def test_line_flow_after_switch_image(qapp) -> None:
+    """需求 7：切图后散行区随之重建。"""
     card = _card(qapp)
-    card.load_result(_three_image_result())
-    card.raw_toggle.setChecked(True)
-    assert card.raw_view.isHidden() is False
-    assert card.raw_view.toPlainText() == "AAA-BRAND-TEXT"
+    result = _three_image_result()
+    result.evidence_images[2].ocr = _ocr("LINE-ONE\nLINE-TWO\nLINE-THREE")
+    card.load_result(result)
+    card.set_current_image("C:/img/3.jpg")
+    assert card.line_flow.count() == 3
 
 
-def test_label_card_uses_dark_surface(qapp) -> None:
-    """9.4：散行标签卡为深色面 + 浅色字（适配深色主题，非白底黑字）。"""
+def test_label_card_uses_light_theme(qapp) -> None:
+    """需求 7：散行标签卡沿用应用**浅色主题**（浅底 + 深字，与 app.qss 一致）。
+
+    v0.3.0 修正：v0.2.0 的卡片是「深色面 + 浅色字」，理由是"适配本机深色主题"，
+    但 ``ui/styles/app.qss`` 实际是**浅色主题**（``#F5F6F8`` 底 / ``#303133`` 字），
+    深色卡片落在白卡上形似渲染异常，故统一为浅色。
+    """
     card = _card(qapp)
     result = _three_image_result()
     result.evidence_images[2].ocr = _ocr("RESIDUE-LINE")
     card.load_result(result)
     card.set_current_image("C:/img/3.jpg")
-    widget = card.residue_flow.itemAt(0).widget()
+    widget = card.line_flow.itemAt(0).widget()
     style = widget.styleSheet().replace(" ", "").lower()
-    assert "#2b2b2b" in style  # 深色面
-    assert "#e0e0e0" in style  # 浅色字
+    assert "#f5f7fa" in style  # 浅色面
+    assert "#303133" in style  # 深色字
+    assert "#2b2b2b" not in style  # 不再使用深色面
 
 
 def test_flow_layout_activates_without_error(qapp) -> None:
-    """9.4：卡片真实显示时 FlowLayout 正常排版（不抛异常，高度按宽度自算）。"""
+    """需求 7：卡片真实显示时 FlowLayout 正常排版（不抛异常，高度按宽度自算）。"""
     card = _card(qapp)
     result = _three_image_result()
     result.evidence_images[2].ocr = _ocr("A\nB\nC")
@@ -494,9 +635,387 @@ def test_flow_layout_activates_without_error(qapp) -> None:
     card.resize(420, 640)
     card.show()
     qapp.processEvents()
-    assert card.residue_flow.count() == 3
-    assert card.residue_flow.heightForWidth(300) > 0
+    assert card.line_flow.count() == 3
+    assert card.line_flow.heightForWidth(300) > 0
     card.close()
+
+
+# ── 需求 8：弹窗行为 ──
+
+
+def test_view_ocr_button_opens_dialog(qapp) -> None:
+    """需求 8：点击按钮 → 弹窗显示当前图 OCR 全文。"""
+    card = _card(qapp)
+    card.load_result(_three_image_result())
+    card._on_view_ocr()  # noqa: SLF001
+    qapp.processEvents()
+    assert card.ocr_dialog.isVisible() is True
+    assert "AAA-BRAND-TEXT" in card.ocr_dialog.current_text()
+    card.ocr_dialog.close()
+
+
+def test_view_ocr_dialog_is_singleton(qapp) -> None:
+    """需求 8：重复点击只置顶，不叠加第二个窗口。"""
+    from PySide6.QtWidgets import QApplication
+
+    card = _card(qapp)
+    card.load_result(_three_image_result())
+    dialog = card.ocr_dialog
+    card._on_view_ocr()  # noqa: SLF001
+    card._on_view_ocr()  # noqa: SLF001
+    qapp.processEvents()
+    found = [w for w in QApplication.topLevelWidgets() if w is dialog]
+    assert found == [dialog]
+    dialog.close()
+
+
+def test_view_ocr_dialog_follows_current_image(qapp) -> None:
+    """需求 8：切图后弹窗内容跟随刷新，且「上一张/下一张」同步可用性。"""
+    card = _card(qapp)
+    card.load_result(_three_image_result())
+    card._on_view_ocr()  # noqa: SLF001
+    card.set_current_image("C:/img/2.jpg")
+    qapp.processEvents()
+    assert "BBB-MODEL-TEXT" in card.ocr_dialog.current_text()
+    dialog = card.ocr_dialog
+    # 第 1 张（下标 0）→ 无上一张，有下一张
+    card.set_current_image("C:/img/1.jpg")
+    qapp.processEvents()
+    assert dialog.btn_prev.isEnabled() is False
+    assert dialog.btn_next.isEnabled() is True
+    # 最后一张 → 有上一张，无下一张
+    card.set_current_image("C:/img/3.jpg")
+    qapp.processEvents()
+    assert dialog.btn_prev.isEnabled() is True
+    assert dialog.btn_next.isEnabled() is False
+    dialog.close()
+
+
+def test_view_ocr_dialog_next_switches_image(qapp) -> None:
+    """需求 8：「下一张」切换卡片当前图并同步左侧查看器（经证据图信号）。"""
+    card = _card(qapp)
+    card.load_result(_three_image_result())
+    card._on_view_ocr()  # noqa: SLF001
+    picked: list[str] = []
+    card.evidence_selected.connect(picked.append)
+    card.ocr_dialog.next_requested.emit()
+    qapp.processEvents()
+    assert card.current_image_path() == "C:/img/2.jpg"
+    assert picked == ["C:/img/2.jpg"]
+    card.ocr_dialog.close()
+
+
+def test_view_ocr_dialog_does_not_cover_image_area(qapp) -> None:
+    """需求 8 红线 R5：弹窗**不得覆盖图片区**（``overlap_with`` 硬断言）。"""
+    from app.session import AppSession
+    from ui.widgets.review_workbench import ReviewWorkbench
+
+    session = AppSession()
+    result = _three_image_result()
+    session.replace([result], ticket_no="SA26090215")
+    workbench = ReviewWorkbench(session)
+    workbench.resize(1100, 620)
+    workbench.show()
+    qapp.processEvents()
+
+    card = workbench.card
+    card._on_view_ocr()  # noqa: SLF001
+    qapp.processEvents()
+
+    viewer = workbench.image_viewer
+    dialog = card.ocr_dialog
+    assert viewer.geometry().width() > 0
+    assert dialog.isVisible() is True
+    assert dialog.overlap_with(viewer) is False
+    dialog.close()
+    workbench.close()
+
+
+def test_view_ocr_dialog_closed_with_card_clear(qapp) -> None:
+    """需求 8：卡片 clear（切走记录）时弹窗一并隐藏。"""
+    card = _card(qapp)
+    card.load_result(_three_image_result())
+    card._on_view_ocr()  # noqa: SLF001
+    qapp.processEvents()
+    assert card.ocr_dialog.isVisible() is True
+    card.clear()
+    qapp.processEvents()
+    assert card.ocr_dialog.isVisible() is False
+
+
+# ══════════════════════════════════════════════════════════════════
+#  需求 2：图片旋转（左旋 / 右旋 90°）
+# ══════════════════════════════════════════════════════════════════
+
+
+def test_rotation_starts_at_zero(qapp, tmp_path) -> None:
+    """需求 2：加载后旋转角为 0°，标签显示 0°。"""
+    viewer = _viewer(qapp, 400, 320)
+    assert viewer.load(_make_png(tmp_path / "r0.png", 120, 60)) is True
+    assert viewer.current_rotation() == 0
+    assert "0" in viewer.rotation_label.text()
+
+
+def test_rotate_right_adds_90(qapp, tmp_path) -> None:
+    """需求 2：右旋一次 = +90°。"""
+    viewer = _viewer(qapp, 400, 320)
+    assert viewer.load(_make_png(tmp_path / "r1.png", 120, 60)) is True
+    viewer.rotate_right()
+    assert viewer.current_rotation() == 90
+    viewer.rotate_left()
+    assert viewer.current_rotation() == 0
+
+
+def test_rotate_left_three_times_equals_right_once(qapp, tmp_path) -> None:
+    """需求 2：左旋 3 次 ≡ 右旋 1 次。"""
+    left = _viewer(qapp, 400, 320)
+    right = _viewer(qapp, 400, 320)
+    path = _make_png(tmp_path / "r2.png", 120, 60)
+    left.load(path)
+    right.load(path)
+    for _ in range(3):
+        left.rotate_left()
+    right.rotate_right()
+    assert left.current_rotation() == right.current_rotation() == 90
+
+
+def test_rotate_left_four_times_returns_to_zero(qapp, tmp_path) -> None:
+    """需求 2：同一方向旋转 4 次回到原位（0°）。"""
+    viewer = _viewer(qapp, 400, 320)
+    viewer.load(_make_png(tmp_path / "r3.png", 120, 60))
+    for _ in range(4):
+        viewer.rotate_left()
+    assert viewer.current_rotation() == 0
+
+
+def test_rotation_reset_on_load_and_clear(qapp, tmp_path) -> None:
+    """需求 2：换图 / 清空自动摆正（旋转复位为 0°）。"""
+    viewer = _viewer(qapp, 400, 320)
+    viewer.load(_make_png(tmp_path / "r4.png", 120, 60))
+    viewer.rotate_right()
+    assert viewer.current_rotation() == 90
+    viewer.load(_make_png(tmp_path / "r5.png", 120, 60))
+    assert viewer.current_rotation() == 0
+    viewer.rotate_left()
+    viewer.clear()
+    assert viewer.current_rotation() == 0
+
+
+def test_rotated_display_size_swaps_axes(qapp, tmp_path) -> None:
+    """需求 2：旋转 90° 后展示尺寸交换宽高（尺寸基准跟随旋转结果，防裁切）。"""
+    viewer = _viewer(qapp, 400, 320)
+    viewer.load(_make_png(tmp_path / "r6.png", 300, 100))
+    before = viewer.display_pixmap().size()
+    viewer.rotate_right()
+    after = viewer.display_pixmap().size()
+    assert (before.width(), before.height()) == (300, 100)
+    assert (after.width(), after.height()) == (100, 300)
+
+
+def test_rotation_auto_fits_to_window(qapp, tmp_path) -> None:
+    """需求 2：旋转后自动 ``fit_to_window``（按**旋转后**尺寸重算缩放，避免出屏）。"""
+    viewer = _viewer(qapp, 400, 320)
+    viewer.load(_make_png(tmp_path / "r7.png", 900, 100))
+    viewer.reset_zoom()  # 1:1
+    qapp.processEvents()
+    before = viewer.current_scale()
+    viewer.rotate_right()  # 900×100 → 100×900，纵向远大于视口
+    qapp.processEvents()
+    assert viewer.current_rotation() == 90
+    assert viewer.display_pixmap().size().height() == 900
+    assert viewer.current_scale() < before  # 已按新尺寸重新适配
+
+
+# ══════════════════════════════════════════════════════════════════
+#  需求 3 + 4：记录表格 + 状态标签 + 模糊搜索 + 选中同步
+# ══════════════════════════════════════════════════════════════════
+
+
+def _mixed_session():
+    """构造 4 条覆盖四种判定的会话（订单号 / 料号 / 票号各异，便于搜索断言）。"""
+    from app.session import AppSession
+
+    specs = [
+        (Verdict.PASS, "2660326M", "N011901-007386-001"),
+        (Verdict.FAIL, "2660310M", "N011901-009350-001"),
+        (Verdict.NO_MARK, "2660311M", "N011901-008888-001"),
+        (Verdict.NO_IMAGE, "2660312M", "N011901-007777-001"),
+    ]
+    results = []
+    for verdict, order, part in specs:
+        record = DeclarationRecord(
+            ticket_no="SA26090215", part_no=part, order_no=order, decl_brand="X"
+        )
+        results.append(CheckResult(key=record.key(), record=record, verdict=verdict))
+    session = AppSession()
+    session.replace(results, ticket_no="SA26090215")
+    return session
+
+
+def _workbench(qapp):
+    from ui.widgets.review_workbench import ReviewWorkbench
+
+    return ReviewWorkbench(_mixed_session())
+
+
+def test_record_table_has_three_columns(qapp) -> None:
+    """需求 4：记录区为表格，三列「订单号 / 物料编号 / 核验结果」。"""
+    workbench = _workbench(qapp)
+    headers = [
+        workbench.record_table.horizontalHeaderItem(col).text()
+        for col in range(workbench.record_table.columnCount())
+    ]
+    assert headers == ["订单号", "物料编号", "核验结果"]
+    assert workbench.record_table.rowCount() == 4
+    assert not hasattr(workbench, "record_list")
+
+
+def test_record_table_row_selection_is_single_and_highlighted(qapp) -> None:
+    """需求 4：单行选择 + 选中行高亮（QSS 定义选中色）。"""
+    from PySide6.QtWidgets import QAbstractItemView
+
+    workbench = _workbench(qapp)
+    table = workbench.record_table
+    assert table.selectionBehavior() == QAbstractItemView.SelectionBehavior.SelectRows
+    assert table.selectionMode() == QAbstractItemView.SelectionMode.SingleSelection
+    style = table.styleSheet().replace(" ", "").lower()
+    assert "item:selected" in style
+
+
+def test_status_buttons_five_with_counts(qapp) -> None:
+    """需求 3：5 个状态标签（全部/成功/待复核/缺图/失败），带数量与灯色。"""
+    workbench = _workbench(qapp)
+    keys = list(workbench.status_buttons)
+    assert keys == [
+        "all",
+        Verdict.PASS.value,
+        Verdict.NO_MARK.value,
+        Verdict.NO_IMAGE.value,
+        Verdict.FAIL.value,
+    ]
+    assert workbench.status_buttons["all"].text() == "全部 4"
+    assert workbench.status_buttons[Verdict.PASS.value].text() == "成功 1"
+    assert workbench.status_buttons[Verdict.NO_MARK.value].text() == "待复核 1"
+    assert workbench.status_buttons[Verdict.NO_IMAGE.value].text() == "缺图 1"
+    assert workbench.status_buttons[Verdict.FAIL.value].text() == "失败 1"
+
+
+def test_status_button_filters_table(qapp) -> None:
+    """需求 3：点「失败」标签 → 表格只剩校验异常一条。"""
+    workbench = _workbench(qapp)
+    workbench.status_buttons[Verdict.FAIL.value].click()
+    assert workbench.current_status() == Verdict.FAIL.value
+    assert workbench.record_table.rowCount() == 1
+    assert workbench.filtered_keys() == [workbench.row_key(0)]
+
+
+def test_status_button_counts_ignore_filter(qapp) -> None:
+    """需求 3：标签数量取**全量**统计，不受当前过滤影响（防误导）。"""
+    workbench = _workbench(qapp)
+    workbench.status_buttons[Verdict.NO_MARK.value].click()
+    assert workbench.status_buttons["all"].text() == "全部 4"
+    assert workbench.status_buttons[Verdict.FAIL.value].text() == "失败 1"
+
+
+def test_search_filters_by_order_no(qapp) -> None:
+    """需求 3：模糊搜索命中订单号。"""
+    workbench = _workbench(qapp)
+    workbench.search_edit.setText("2660310")
+    assert workbench.record_table.rowCount() == 1
+    assert workbench.record_table.item(0, 0).text() == "2660310M"
+
+
+def test_search_filters_by_part_no(qapp) -> None:
+    """需求 3：模糊搜索命中物料编号（部分子串）。"""
+    workbench = _workbench(qapp)
+    workbench.search_edit.setText("9350")
+    assert workbench.record_table.rowCount() == 1
+    assert "009350" in workbench.record_table.item(0, 1).text()
+
+
+def test_search_filters_by_ticket_no(qapp) -> None:
+    """需求 3：模糊搜索命中出货单号（票号）。"""
+    workbench = _workbench(qapp)
+    workbench.search_edit.setText("sa26090215")
+    assert workbench.record_table.rowCount() == 4
+
+
+def test_search_is_case_insensitive(qapp) -> None:
+    """需求 3：大小写不敏感。"""
+    workbench = _workbench(qapp)
+    workbench.search_edit.setText("n011901-007777")
+    assert workbench.record_table.rowCount() == 1
+    workbench.search_edit.setText("N011901-007777")
+    assert workbench.record_table.rowCount() == 1
+
+
+def test_search_combined_with_status(qapp) -> None:
+    """需求 3：过滤管线 = 状态标签 → 模糊搜索（两条件叠加）。"""
+    workbench = _workbench(qapp)
+    workbench.status_buttons[Verdict.PASS.value].click()
+    assert workbench.record_table.rowCount() == 1
+    workbench.search_edit.setText("2660310")  # 属失败条 → 叠加后为空
+    assert workbench.record_table.rowCount() == 0
+    assert workbench.filtered_keys() == []
+
+
+def test_empty_filter_result_shows_hint(qapp) -> None:
+    """需求 3：过滤后无匹配 → 中间图片区显示提示，右侧卡片清空。"""
+    workbench = _workbench(qapp)
+    workbench.search_edit.setText("NO-SUCH-ORDER")
+    assert workbench.record_table.rowCount() == 0
+    assert "无匹配记录" in workbench.image_viewer.image_label.text()
+    assert workbench.card.current_key() == ""
+
+
+def test_row_selection_syncs_image_and_card(qapp, tmp_path) -> None:
+    """需求 4：选中行 → 同步切中间图片与右侧结果。"""
+    from app.session import AppSession
+    from ui.widgets.review_workbench import ReviewWorkbench
+
+    img_a = _make_png(tmp_path / "a.png", 80, 60)
+    img_b = _make_png(tmp_path / "b.png", 120, 40)
+    records = []
+    for order, part, image in (("O-A", "P-A", img_a), ("O-B", "P-B", img_b)):
+        record = DeclarationRecord(ticket_no="T", part_no=part, order_no=order)
+        records.append(
+            CheckResult(
+                key=record.key(),
+                record=record,
+                verdict=Verdict.FAIL,
+                evidence_images=[ImageEvidence(image_path=image, seq=1, exists=True)],
+            )
+        )
+    session = AppSession()
+    session.replace(records, ticket_no="T")
+    workbench = ReviewWorkbench(session)
+    workbench.resize(1100, 620)
+    workbench.show()
+    qapp.processEvents()
+
+    workbench._select_row(1)  # noqa: SLF001
+    qapp.processEvents()
+    assert workbench.current_key() == records[1].key
+    assert workbench.card.current_key() == records[1].key
+    assert workbench.card.current_image_path() == img_b
+    workbench.close()
+
+
+def test_select_key_relaxes_filter(qapp) -> None:
+    """需求 3：`select_key` 对当前过滤下不可见的记录自动放宽为「全部 + 清空搜索」。"""
+    workbench = _workbench(qapp)
+    workbench.status_buttons[Verdict.FAIL.value].click()
+    target = workbench._all_results()[0].key  # noqa: SLF001 - 第 1 条是 PASS（当前不可见）
+    assert workbench.select_key(target) is True
+    assert workbench.current_status() == "all"
+    assert workbench.search_edit.text() == ""
+
+
+def test_review_pending_count(qapp) -> None:
+    """头部「待复核：N 条」计数 = ⚠️ + 🔵。"""
+    workbench = _workbench(qapp)
+    assert workbench.review_pending_count() == 2
+    assert "待复核：2 条" in workbench.pending_label.text()
 
 
 # ══════════════════════════════════════════════════════════════════

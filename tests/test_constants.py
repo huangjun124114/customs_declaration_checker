@@ -60,9 +60,23 @@ class TestVerdictStrings:
         assert C.REVIEW_VERDICTS == (Verdict.NO_MARK, Verdict.NO_IMAGE)
 
 
+class TestFieldNames:
+    """字段名唯一来源（v0.3.0）——防 UI / 引擎字面量漂移。"""
+
+    def test_field_name_values(self) -> None:
+        assert C.FIELD_BRAND == "品牌"
+        assert C.FIELD_MODEL == "型号"
+
+    def test_judge_engine_aliases_match(self) -> None:
+        """``judge_engine._FIELD_*`` 必须是 constants 的别名（不得独立字面量）。"""
+        from core import judge_engine
+
+        assert judge_engine._FIELD_BRAND == C.FIELD_BRAND  # noqa: SLF001
+        assert judge_engine._FIELD_MODEL == C.FIELD_MODEL  # noqa: SLF001
+
+
 class TestColumns:
     """汇总表 13 列（SOP 七）。"""
-
     def test_exactly_13_columns(self) -> None:
         assert len(C.COLUMNS) == 13
         assert C.COLUMN_COUNT == 13

@@ -18,7 +18,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from dataclasses import field as dc_field
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:  # pragma: no cover - 仅类型标注用，避免与 token_matcher 循环 import
+    from core.token_matcher import TokenMatch
 
 __all__ = [
     "Verdict",
@@ -364,6 +367,9 @@ class CheckResult:
             **不置** 本字段。
             ⚠️ **T05 自动暂停的唯一判据**：条件是「连续 K 条 ``unreachable==True``」；
             **严禁**改用「连续 K 条 ``NO_IMAGE``」——用户票号填错时会误挂整批。
+        token_matches: 品牌 / 型号的**完整分词命中结果**（v0.3.0 需求 1，各一条）。
+            ⚠️ **绝不进 13 列汇总表**：只进 :meth:`to_dict`（详细 JSON 日志）与复核工作台
+            （「判定链路」三列的「判定值」来源），保证 :meth:`to_row` 列数恒为 13。
     """
 
     key: str = ""
@@ -381,6 +387,22 @@ class CheckResult:
     evidence_images: list[ImageEvidence] = dc_field(default_factory=list)
     #: 共享盘不可达标志（**不占 13 列**；仅进 ``to_dict``，供 T05 结构化暂停计数）
     unreachable: bool = False
+    #: 完整分词命中结果（**不占 13 列**；仅进 ``to_dict`` + 复核工作台）
+    token_matches: list[TokenMatch] = dc_field(default_factory=list)
+
+    def token_match_for(self, field_name: str) -> TokenMatch | None:
+        """取某字段的完整分词命中结果（无则 ``None``）。
+
+        Args:
+            field_name: 字段名（``品牌`` / ``型号``）。
+
+        Returns:
+            :class:`core.token_matcher.TokenMatch` 或 ``None``。
+        """
+        for match in self.token_matches:
+            if getattr(match, "field", "") == field_name:
+                return match
+        return None
 
     def to_dict(self) -> dict[str, Any]:
         """序列化为字典（含完整证据，供 JSON 详细日志）。"""
@@ -399,6 +421,7 @@ class CheckResult:
             "record": self.record.to_dict() if self.record is not None else None,
             "evidence_images": [e.to_dict() for e in self.evidence_images],
             "unreachable": self.unreachable,
+            "token_matches": [m.to_dict() for m in self.token_matches],
         }
 
     def to_row(self) -> list[Any]:

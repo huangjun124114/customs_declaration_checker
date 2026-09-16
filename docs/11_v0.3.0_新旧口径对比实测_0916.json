@@ -1,0 +1,823 @@
+{
+  "snapshot": "D:\\Data\\workspace\\workdoc\\AI测试\\过程产出\\校验详细日志_SA26090215_累积.json",
+  "legacy_ref": "dfe00d5",
+  "records": 18,
+  "old_counts": {
+    "PASS": 1,
+    "FAIL": 12,
+    "NO_MARK": 5,
+    "NO_IMAGE": 0
+  },
+  "new_counts": {
+    "PASS": 7,
+    "FAIL": 7,
+    "NO_MARK": 4,
+    "NO_IMAGE": 0
+  },
+  "snapshot_counts": {
+    "PASS": 1,
+    "FAIL": 12,
+    "NO_MARK": 5,
+    "NO_IMAGE": 0
+  },
+  "changed_count": 6,
+  "legacy_selfcheck_mismatch": [],
+  "rows": [
+    {
+      "seq_no": 1,
+      "key": "SA26090215|N011901-007386-001|2660326M",
+      "snapshot_verdict": "FAIL",
+      "old_verdict": "FAIL",
+      "new_verdict": "PASS",
+      "changed": true,
+      "refresh_note": "",
+      "decl_brand": "baori",
+      "decl_model": "",
+      "old_detected_brand": "Daewoo",
+      "old_detected_model": "",
+      "new_detected_brand": "Daewoo",
+      "new_detected_model": "",
+      "brand_match": {
+        "field": "品牌",
+        "declared": "baori",
+        "mode": "EXACT",
+        "token": "baori",
+        "images": [
+          2
+        ],
+        "sample_line": "baori",
+        "corrected_from": "",
+        "note": "品牌：图片中以完整分词命中『baori』（图 2）"
+      },
+      "model_match": {
+        "field": "型号",
+        "declared": "",
+        "mode": "NONE",
+        "token": "",
+        "images": [],
+        "sample_line": "",
+        "corrected_from": "",
+        "note": "型号：申报值为空，未参与完整分词匹配"
+      },
+      "old_reason": "品牌：申报『baori』与图片『Daewoo』明确不一致",
+      "new_reason": "型号双方均为『无』；品牌一致，判合格；品牌：图片中以完整分词命中『baori』（图 2）",
+      "old_diffs": [
+        "外箱整机品牌，不构成本体证据"
+      ],
+      "new_diffs": []
+    },
+    {
+      "seq_no": 2,
+      "key": "SA26090215|N011901-007957-001|2660328M",
+      "snapshot_verdict": "FAIL",
+      "old_verdict": "FAIL",
+      "new_verdict": "FAIL",
+      "changed": false,
+      "refresh_note": "",
+      "decl_brand": "",
+      "decl_model": "",
+      "old_detected_brand": "SANSUI",
+      "old_detected_model": "",
+      "new_detected_brand": "SANSUI",
+      "new_detected_model": "",
+      "brand_match": {
+        "field": "品牌",
+        "declared": "",
+        "mode": "NONE",
+        "token": "",
+        "images": [],
+        "sample_line": "",
+        "corrected_from": "",
+        "note": "品牌：申报值为空，未参与完整分词匹配"
+      },
+      "model_match": {
+        "field": "型号",
+        "declared": "",
+        "mode": "NONE",
+        "token": "",
+        "images": [],
+        "sample_line": "",
+        "corrected_from": "",
+        "note": "型号：申报值为空，未参与完整分词匹配"
+      },
+      "old_reason": "品牌：申报『』与图片『SANSUI』明确不一致",
+      "new_reason": "品牌：申报『』与图片『SANSUI』明确不一致",
+      "old_diffs": [
+        "外箱整机品牌，不构成本体证据"
+      ],
+      "new_diffs": [
+        "外箱整机品牌，不构成本体证据"
+      ]
+    },
+    {
+      "seq_no": 3,
+      "key": "SA26090215|N011901-009350-001|2660310M",
+      "snapshot_verdict": "NO_MARK",
+      "old_verdict": "NO_MARK",
+      "new_verdict": "NO_MARK",
+      "changed": false,
+      "refresh_note": "",
+      "decl_brand": "",
+      "decl_model": "",
+      "old_detected_brand": "Daewoo",
+      "old_detected_model": "",
+      "new_detected_brand": "Daewoo",
+      "new_detected_model": "",
+      "brand_match": {
+        "field": "品牌",
+        "declared": "",
+        "mode": "NONE",
+        "token": "",
+        "images": [],
+        "sample_line": "",
+        "corrected_from": "",
+        "note": "品牌：申报值为空，未参与完整分词匹配"
+      },
+      "model_match": {
+        "field": "型号",
+        "declared": "",
+        "mode": "NONE",
+        "token": "",
+        "images": [],
+        "sample_line": "",
+        "corrected_from": "",
+        "note": "型号：申报值为空，未参与完整分词匹配"
+      },
+      "old_reason": "疑似 OCR 噪声（疑罪从无），转人工复核；品牌：OCR 置信度低于阈值 0.5，证据不足，转人工复核",
+      "new_reason": "疑似 OCR 噪声（疑罪从无），转人工复核；品牌：OCR 置信度低于阈值 0.5，证据不足，转人工复核；品牌：申报值为空，未参与完整分词匹配",
+      "old_diffs": [
+        "外箱整机品牌，不构成本体证据"
+      ],
+      "new_diffs": [
+        "外箱整机品牌，不构成本体证据"
+      ]
+    },
+    {
+      "seq_no": 4,
+      "key": "SA26090215|N011901-009690-001|2660310M",
+      "snapshot_verdict": "NO_MARK",
+      "old_verdict": "NO_MARK",
+      "new_verdict": "PASS",
+      "changed": true,
+      "refresh_note": "",
+      "decl_brand": "宇同",
+      "decl_model": "",
+      "old_detected_brand": "5KYWORTH",
+      "old_detected_model": "",
+      "new_detected_brand": "5KYWORTH",
+      "new_detected_model": "",
+      "brand_match": {
+        "field": "品牌",
+        "declared": "宇同",
+        "mode": "EXACT",
+        "token": "宇同",
+        "images": [
+          1
+        ],
+        "sample_line": "宇同电子（惠州）有限公司",
+        "corrected_from": "",
+        "note": "品牌：图片中以完整分词命中『宇同』（图 1）"
+      },
+      "model_match": {
+        "field": "型号",
+        "declared": "",
+        "mode": "NONE",
+        "token": "",
+        "images": [],
+        "sample_line": "",
+        "corrected_from": "",
+        "note": "型号：申报值为空，未参与完整分词匹配"
+      },
+      "old_reason": "疑似 OCR 噪声（疑罪从无），转人工复核；品牌：整段 OCR 命中已知噪声样本 / 存在跨文字体系比对，疑似整体误读，转人工复核",
+      "new_reason": "型号双方均为『无』；品牌一致，判合格；品牌：图片中以完整分词命中『宇同』（图 1）",
+      "old_diffs": [
+        "品牌：整段 OCR 命中已知噪声样本 / 存在跨文字体系比对，疑似整体误读，转人工复核"
+      ],
+      "new_diffs": []
+    },
+    {
+      "seq_no": 5,
+      "key": "SA26090215|N011901-011380-001|2660326M",
+      "snapshot_verdict": "FAIL",
+      "old_verdict": "FAIL",
+      "new_verdict": "PASS",
+      "changed": true,
+      "refresh_note": "",
+      "decl_brand": "baori",
+      "decl_model": "",
+      "old_detected_brand": "NMY",
+      "old_detected_model": "",
+      "new_detected_brand": "NMY",
+      "new_detected_model": "",
+      "brand_match": {
+        "field": "品牌",
+        "declared": "baori",
+        "mode": "EXACT",
+        "token": "baori",
+        "images": [
+          4
+        ],
+        "sample_line": "baori E339609 AWM 20941 105C 90V VW",
+        "corrected_from": "",
+        "note": "品牌：图片中以完整分词命中『baori』（图 4）"
+      },
+      "model_match": {
+        "field": "型号",
+        "declared": "",
+        "mode": "NONE",
+        "token": "",
+        "images": [],
+        "sample_line": "",
+        "corrected_from": "",
+        "note": "型号：申报值为空，未参与完整分词匹配"
+      },
+      "old_reason": "品牌：申报『baori』与图片『NMY』明确不一致",
+      "new_reason": "型号双方均为『无』；品牌一致，判合格；品牌：图片中以完整分词命中『baori』（图 4）",
+      "old_diffs": [
+        "品牌：申报『baori』与图片『NMY』明确不一致"
+      ],
+      "new_diffs": []
+    },
+    {
+      "seq_no": 6,
+      "key": "SA26090215|N011901-012062-001|2660689M",
+      "snapshot_verdict": "NO_MARK",
+      "old_verdict": "NO_MARK",
+      "new_verdict": "NO_MARK",
+      "changed": false,
+      "refresh_note": "",
+      "decl_brand": "YUTONG",
+      "decl_model": "",
+      "old_detected_brand": "Daewoo",
+      "old_detected_model": "",
+      "new_detected_brand": "Daewoo",
+      "new_detected_model": "",
+      "brand_match": {
+        "field": "品牌",
+        "declared": "YUTONG",
+        "mode": "NONE",
+        "token": "",
+        "images": [],
+        "sample_line": "",
+        "corrected_from": "",
+        "note": "品牌：图片 OCR 全文未出现完整分词『YUTONG』"
+      },
+      "model_match": {
+        "field": "型号",
+        "declared": "",
+        "mode": "NONE",
+        "token": "",
+        "images": [],
+        "sample_line": "",
+        "corrected_from": "",
+        "note": "型号：申报值为空，未参与完整分词匹配"
+      },
+      "old_reason": "疑似 OCR 噪声（疑罪从无），转人工复核；品牌：OCR 置信度低于阈值 0.5，证据不足，转人工复核",
+      "new_reason": "疑似 OCR 噪声（疑罪从无），转人工复核；品牌：OCR 置信度低于阈值 0.5，证据不足，转人工复核；品牌：图片 OCR 全文未出现完整分词『YUTONG』",
+      "old_diffs": [
+        "外箱整机品牌，不构成本体证据"
+      ],
+      "new_diffs": [
+        "外箱整机品牌，不构成本体证据"
+      ]
+    },
+    {
+      "seq_no": 7,
+      "key": "SA26090215|N011901-012063-001|2660689M",
+      "snapshot_verdict": "NO_MARK",
+      "old_verdict": "NO_MARK",
+      "new_verdict": "NO_MARK",
+      "changed": false,
+      "refresh_note": "",
+      "decl_brand": "YUTONG",
+      "decl_model": "",
+      "old_detected_brand": "",
+      "old_detected_model": "",
+      "new_detected_brand": "",
+      "new_detected_model": "",
+      "brand_match": {
+        "field": "品牌",
+        "declared": "YUTONG",
+        "mode": "NONE",
+        "token": "",
+        "images": [],
+        "sample_line": "",
+        "corrected_from": "",
+        "note": "品牌：图片 OCR 全文未出现完整分词『YUTONG』"
+      },
+      "model_match": {
+        "field": "型号",
+        "declared": "",
+        "mode": "NONE",
+        "token": "",
+        "images": [],
+        "sample_line": "",
+        "corrected_from": "",
+        "note": "型号：申报值为空，未参与完整分词匹配"
+      },
+      "old_reason": "疑似 OCR 噪声（疑罪从无），转人工复核；品牌：OCR 置信度低于阈值 0.5，证据不足，转人工复核",
+      "new_reason": "疑似 OCR 噪声（疑罪从无），转人工复核；品牌：OCR 置信度低于阈值 0.5，证据不足，转人工复核；品牌：图片 OCR 全文未出现完整分词『YUTONG』",
+      "old_diffs": [
+        "品牌：OCR 置信度低于阈值 0.5，证据不足，转人工复核"
+      ],
+      "new_diffs": [
+        "品牌：OCR 置信度低于阈值 0.5，证据不足，转人工复核"
+      ]
+    },
+    {
+      "seq_no": 8,
+      "key": "SA26090215|N011901-012194-001|2660689M",
+      "snapshot_verdict": "PASS",
+      "old_verdict": "PASS",
+      "new_verdict": "PASS",
+      "changed": false,
+      "refresh_note": "",
+      "decl_brand": "",
+      "decl_model": "",
+      "old_detected_brand": "",
+      "old_detected_model": "",
+      "new_detected_brand": "",
+      "new_detected_model": "",
+      "brand_match": {
+        "field": "品牌",
+        "declared": "",
+        "mode": "NONE",
+        "token": "",
+        "images": [],
+        "sample_line": "",
+        "corrected_from": "",
+        "note": "品牌：申报值为空，未参与完整分词匹配"
+      },
+      "model_match": {
+        "field": "型号",
+        "declared": "",
+        "mode": "NONE",
+        "token": "",
+        "images": [],
+        "sample_line": "",
+        "corrected_from": "",
+        "note": "型号：申报值为空，未参与完整分词匹配"
+      },
+      "old_reason": "品牌与型号双方均为『无』，判合格",
+      "new_reason": "品牌与型号双方均为『无』，判合格",
+      "old_diffs": [],
+      "new_diffs": []
+    },
+    {
+      "seq_no": 9,
+      "key": "SA26090215|N030102-001217-906|2660310M",
+      "snapshot_verdict": "FAIL",
+      "old_verdict": "FAIL",
+      "new_verdict": "FAIL",
+      "changed": false,
+      "refresh_note": "",
+      "decl_brand": "",
+      "decl_model": "L8M30E0",
+      "old_detected_brand": "Daewoo",
+      "old_detected_model": "L8M30E0",
+      "new_detected_brand": "Daewoo",
+      "new_detected_model": "L8M30E0",
+      "brand_match": {
+        "field": "品牌",
+        "declared": "",
+        "mode": "NONE",
+        "token": "",
+        "images": [],
+        "sample_line": "",
+        "corrected_from": "",
+        "note": "品牌：申报值为空，未参与完整分词匹配"
+      },
+      "model_match": {
+        "field": "型号",
+        "declared": "L8M30E0",
+        "mode": "EXACT",
+        "token": "L8M30E0",
+        "images": [
+          3,
+          5,
+          6,
+          7
+        ],
+        "sample_line": "L8M30E0",
+        "corrected_from": "",
+        "note": "型号：图片中以完整分词命中『L8M30E0』（图 3、5、6、7）"
+      },
+      "old_reason": "品牌：申报『』与图片『Daewoo』明确不一致",
+      "new_reason": "品牌：申报『』与图片『Daewoo』明确不一致；型号：图片中以完整分词命中『L8M30E0』（图 3、5、6、7）",
+      "old_diffs": [
+        "外箱整机品牌，不构成本体证据"
+      ],
+      "new_diffs": [
+        "外箱整机品牌，不构成本体证据"
+      ]
+    },
+    {
+      "seq_no": 10,
+      "key": "SA26090215|N030102-001508-90A|2660689M",
+      "snapshot_verdict": "NO_MARK",
+      "old_verdict": "NO_MARK",
+      "new_verdict": "NO_MARK",
+      "changed": false,
+      "refresh_note": "",
+      "decl_brand": "",
+      "decl_model": "L5B40L1",
+      "old_detected_brand": "Daewoo",
+      "old_detected_model": "",
+      "new_detected_brand": "Daewoo",
+      "new_detected_model": "",
+      "brand_match": {
+        "field": "品牌",
+        "declared": "",
+        "mode": "NONE",
+        "token": "",
+        "images": [],
+        "sample_line": "",
+        "corrected_from": "",
+        "note": "品牌：申报值为空，未参与完整分词匹配"
+      },
+      "model_match": {
+        "field": "型号",
+        "declared": "L5B40L1",
+        "mode": "EXACT",
+        "token": "L5B40L1",
+        "images": [
+          8
+        ],
+        "sample_line": "L5B40L1",
+        "corrected_from": "",
+        "note": "型号：图片中以完整分词命中『L5B40L1』（图 8）"
+      },
+      "old_reason": "疑似 OCR 噪声（疑罪从无），转人工复核；品牌：OCR 置信度低于阈值 0.5，证据不足，转人工复核；型号：OCR 置信度低于阈值 0.5，证据不足，转人工复核",
+      "new_reason": "疑似 OCR 噪声（疑罪从无），转人工复核；品牌：OCR 置信度低于阈值 0.5，证据不足，转人工复核；品牌：申报值为空，未参与完整分词匹配；型号：图片中以完整分词命中『L5B40L1』（图 8）",
+      "old_diffs": [
+        "外箱整机品牌，不构成本体证据",
+        "型号：OCR 置信度低于阈值 0.5，证据不足，转人工复核"
+      ],
+      "new_diffs": [
+        "外箱整机品牌，不构成本体证据"
+      ]
+    },
+    {
+      "seq_no": 11,
+      "key": "SA26090215|N030103-022910-917|2660326M",
+      "snapshot_verdict": "FAIL",
+      "old_verdict": "FAIL",
+      "new_verdict": "FAIL",
+      "changed": false,
+      "refresh_note": "",
+      "decl_brand": "",
+      "decl_model": "A9KB9G",
+      "old_detected_brand": "Daewoo",
+      "old_detected_model": "A9KB9G",
+      "new_detected_brand": "Daewoo",
+      "new_detected_model": "A9KB9G",
+      "brand_match": {
+        "field": "品牌",
+        "declared": "",
+        "mode": "NONE",
+        "token": "",
+        "images": [],
+        "sample_line": "",
+        "corrected_from": "",
+        "note": "品牌：申报值为空，未参与完整分词匹配"
+      },
+      "model_match": {
+        "field": "型号",
+        "declared": "A9KB9G",
+        "mode": "EXACT",
+        "token": "A9KB9G",
+        "images": [
+          1
+        ],
+        "sample_line": "MODEL:A9KB9G",
+        "corrected_from": "",
+        "note": "型号：图片中以完整分词命中『A9KB9G』（图 1）"
+      },
+      "old_reason": "品牌：申报『』与图片『Daewoo』明确不一致",
+      "new_reason": "品牌：申报『』与图片『Daewoo』明确不一致；型号：图片中以完整分词命中『A9KB9G』（图 1）",
+      "old_diffs": [
+        "外箱整机品牌，不构成本体证据"
+      ],
+      "new_diffs": [
+        "外箱整机品牌，不构成本体证据"
+      ]
+    },
+    {
+      "seq_no": 12,
+      "key": "SA26090215|N030103-023288-908|2660308M",
+      "snapshot_verdict": "FAIL",
+      "old_verdict": "FAIL",
+      "new_verdict": "FAIL",
+      "changed": false,
+      "refresh_note": "",
+      "decl_brand": "",
+      "decl_model": "A7A01G",
+      "old_detected_brand": "Daewoo",
+      "old_detected_model": "A7A01G",
+      "new_detected_brand": "Daewoo",
+      "new_detected_model": "A7A01G",
+      "brand_match": {
+        "field": "品牌",
+        "declared": "",
+        "mode": "NONE",
+        "token": "",
+        "images": [],
+        "sample_line": "",
+        "corrected_from": "",
+        "note": "品牌：申报值为空，未参与完整分词匹配"
+      },
+      "model_match": {
+        "field": "型号",
+        "declared": "A7A01G",
+        "mode": "EXACT",
+        "token": "A7A01G",
+        "images": [
+          3
+        ],
+        "sample_line": "Model:A7A01G",
+        "corrected_from": "",
+        "note": "型号：图片中以完整分词命中『A7A01G』（图 3）"
+      },
+      "old_reason": "品牌：申报『』与图片『Daewoo』明确不一致",
+      "new_reason": "品牌：申报『』与图片『Daewoo』明确不一致；型号：图片中以完整分词命中『A7A01G』（图 3）",
+      "old_diffs": [
+        "外箱整机品牌，不构成本体证据"
+      ],
+      "new_diffs": [
+        "外箱整机品牌，不构成本体证据"
+      ]
+    },
+    {
+      "seq_no": 13,
+      "key": "SA26090215|N030103-023288-90A|2660328M",
+      "snapshot_verdict": "FAIL",
+      "old_verdict": "FAIL",
+      "new_verdict": "FAIL",
+      "changed": false,
+      "refresh_note": "",
+      "decl_brand": "",
+      "decl_model": "A7A01G",
+      "old_detected_brand": "SANSUI",
+      "old_detected_model": "A7A01G",
+      "new_detected_brand": "SANSUI",
+      "new_detected_model": "A7A01G",
+      "brand_match": {
+        "field": "品牌",
+        "declared": "",
+        "mode": "NONE",
+        "token": "",
+        "images": [],
+        "sample_line": "",
+        "corrected_from": "",
+        "note": "品牌：申报值为空，未参与完整分词匹配"
+      },
+      "model_match": {
+        "field": "型号",
+        "declared": "A7A01G",
+        "mode": "EXACT",
+        "token": "A7A01G",
+        "images": [
+          4
+        ],
+        "sample_line": "Model:A7A01G",
+        "corrected_from": "",
+        "note": "型号：图片中以完整分词命中『A7A01G』（图 4）"
+      },
+      "old_reason": "品牌：申报『』与图片『SANSUI』明确不一致",
+      "new_reason": "品牌：申报『』与图片『SANSUI』明确不一致；型号：图片中以完整分词命中『A7A01G』（图 4）",
+      "old_diffs": [
+        "外箱整机品牌，不构成本体证据"
+      ],
+      "new_diffs": [
+        "外箱整机品牌，不构成本体证据"
+      ]
+    },
+    {
+      "seq_no": 14,
+      "key": "SA26090215|N030103-023966-905|2660310M",
+      "snapshot_verdict": "FAIL",
+      "old_verdict": "FAIL",
+      "new_verdict": "FAIL",
+      "changed": false,
+      "refresh_note": "",
+      "decl_brand": "",
+      "decl_model": "A9KA8B",
+      "old_detected_brand": "Daewoo",
+      "old_detected_model": "",
+      "new_detected_brand": "Daewoo",
+      "new_detected_model": "",
+      "brand_match": {
+        "field": "品牌",
+        "declared": "",
+        "mode": "NONE",
+        "token": "",
+        "images": [],
+        "sample_line": "",
+        "corrected_from": "",
+        "note": "品牌：申报值为空，未参与完整分词匹配"
+      },
+      "model_match": {
+        "field": "型号",
+        "declared": "A9KA8B",
+        "mode": "NONE",
+        "token": "",
+        "images": [],
+        "sample_line": "",
+        "corrected_from": "",
+        "note": "型号：图片 OCR 全文未出现完整分词『A9KA8B』"
+      },
+      "old_reason": "品牌：申报『』与图片『Daewoo』明确不一致",
+      "new_reason": "品牌：申报『』与图片『Daewoo』明确不一致；型号：图片 OCR 全文未出现完整分词『A9KA8B』",
+      "old_diffs": [
+        "外箱整机品牌，不构成本体证据"
+      ],
+      "new_diffs": [
+        "外箱整机品牌，不构成本体证据"
+      ]
+    },
+    {
+      "seq_no": 15,
+      "key": "SA26090215|N030103-025345-90E|2660689M",
+      "snapshot_verdict": "FAIL",
+      "old_verdict": "FAIL",
+      "new_verdict": "FAIL",
+      "changed": false,
+      "refresh_note": "",
+      "decl_brand": "",
+      "decl_model": "A9KFBG",
+      "old_detected_brand": "Daewoo",
+      "old_detected_model": "A9KFBG",
+      "new_detected_brand": "Daewoo",
+      "new_detected_model": "A9KFBG",
+      "brand_match": {
+        "field": "品牌",
+        "declared": "",
+        "mode": "NONE",
+        "token": "",
+        "images": [],
+        "sample_line": "",
+        "corrected_from": "",
+        "note": "品牌：申报值为空，未参与完整分词匹配"
+      },
+      "model_match": {
+        "field": "型号",
+        "declared": "A9KFBG",
+        "mode": "EXACT",
+        "token": "A9KFBG",
+        "images": [
+          3,
+          4,
+          5
+        ],
+        "sample_line": "A9KFBG",
+        "corrected_from": "",
+        "note": "型号：图片中以完整分词命中『A9KFBG』（图 3、4、5）"
+      },
+      "old_reason": "品牌：申报『』与图片『Daewoo』明确不一致",
+      "new_reason": "品牌：申报『』与图片『Daewoo』明确不一致；型号：图片中以完整分词命中『A9KFBG』（图 3、4、5）",
+      "old_diffs": [
+        "外箱整机品牌，不构成本体证据"
+      ],
+      "new_diffs": [
+        "外箱整机品牌，不构成本体证据"
+      ]
+    },
+    {
+      "seq_no": 16,
+      "key": "SA26090215|N030107-003211-001|2660310M",
+      "snapshot_verdict": "FAIL",
+      "old_verdict": "FAIL",
+      "new_verdict": "PASS",
+      "changed": true,
+      "refresh_note": "申报侧刷新：品牌『DAEWOO』→『DAEWOO』、型号『』→『HS-8A50J-12』",
+      "decl_brand": "DAEWOO",
+      "decl_model": "HS-8A50J-12",
+      "old_detected_brand": "SKYHORTH",
+      "old_detected_model": "HS-8AA",
+      "new_detected_brand": "SKYHORTH",
+      "new_detected_model": "HS-8AA",
+      "brand_match": {
+        "field": "品牌",
+        "declared": "DAEWOO",
+        "mode": "EXACT",
+        "token": "DAEWOO",
+        "images": [
+          3
+        ],
+        "sample_line": "DAEWOO",
+        "corrected_from": "",
+        "note": "品牌：图片中以完整分词命中『DAEWOO』（图 3）"
+      },
+      "model_match": {
+        "field": "型号",
+        "declared": "HS-8A50J-12",
+        "mode": "EXACT",
+        "token": "HS-8A50J-12",
+        "images": [
+          6
+        ],
+        "sample_line": "HS-8A50J-12 K1 002537",
+        "corrected_from": "",
+        "note": "型号：图片中以完整分词命中『HS-8A50J-12』（图 6）"
+      },
+      "old_reason": "品牌：申报『DAEWOO』与图片『SKYWORTH P/N』明确不一致（已知 OCR 误读『SKYHORTH』已纠正为『SKYWORTH P/N』）；型号：申报『HS-8A50J-12』与图片『HS-8AA』明确不一致",
+      "new_reason": "申报值与图片识别值一致，判合格；品牌：图片中以完整分词命中『DAEWOO』（图 3）；型号：图片中以完整分词命中『HS-8A50J-12』（图 6）",
+      "old_diffs": [
+        "品牌：申报『DAEWOO』与图片『SKYWORTH P/N』明确不一致（已知 OCR 误读『SKYHORTH』已纠正为『SKYWORTH P/N』）",
+        "型号：申报『HS-8A50J-12』与图片『HS-8AA』明确不一致"
+      ],
+      "new_diffs": []
+    },
+    {
+      "seq_no": 17,
+      "key": "SA26090215|N030107-003211-001|2660326M",
+      "snapshot_verdict": "FAIL",
+      "old_verdict": "FAIL",
+      "new_verdict": "PASS",
+      "changed": true,
+      "refresh_note": "申报侧刷新：品牌『DAEWOO』→『DAEWOO』、型号『』→『HS-8A50J-12』",
+      "decl_brand": "DAEWOO",
+      "decl_model": "HS-8A50J-12",
+      "old_detected_brand": "Daewoo",
+      "old_detected_model": "HS-8AA",
+      "new_detected_brand": "Daewoo",
+      "new_detected_model": "HS-8AA",
+      "brand_match": {
+        "field": "品牌",
+        "declared": "DAEWOO",
+        "mode": "EXACT",
+        "token": "DAEWOO",
+        "images": [
+          3
+        ],
+        "sample_line": "Handset HS-8A50-12 DAEWOO RoHS REACH",
+        "corrected_from": "",
+        "note": "品牌：图片中以完整分词命中『DAEWOO』（图 3）"
+      },
+      "model_match": {
+        "field": "型号",
+        "declared": "HS-8A50J-12",
+        "mode": "EXACT",
+        "token": "HS-8A50J-12",
+        "images": [
+          4
+        ],
+        "sample_line": "HS-8A50J-12 K1 004227",
+        "corrected_from": "",
+        "note": "型号：图片中以完整分词命中『HS-8A50J-12』（图 4）"
+      },
+      "old_reason": "型号：申报『HS-8A50J-12』与图片『HS-8AA』明确不一致",
+      "new_reason": "申报值与图片识别值一致，判合格；品牌：图片中以完整分词命中『DAEWOO』（图 3）；型号：图片中以完整分词命中『HS-8A50J-12』（图 4）",
+      "old_diffs": [
+        "型号：申报『HS-8A50J-12』与图片『HS-8AA』明确不一致"
+      ],
+      "new_diffs": []
+    },
+    {
+      "seq_no": 18,
+      "key": "SA26090215|N030107-003211-001|2660689M",
+      "snapshot_verdict": "FAIL",
+      "old_verdict": "FAIL",
+      "new_verdict": "PASS",
+      "changed": true,
+      "refresh_note": "申报侧刷新：品牌『DAEWOO』→『DAEWOO』、型号『』→『HS-8A50J-12』",
+      "decl_brand": "DAEWOO",
+      "decl_model": "HS-8A50J-12",
+      "old_detected_brand": "Daewoo",
+      "old_detected_model": "HS-8AA",
+      "new_detected_brand": "Daewoo",
+      "new_detected_model": "HS-8AA",
+      "brand_match": {
+        "field": "品牌",
+        "declared": "DAEWOO",
+        "mode": "EXACT",
+        "token": "DAEWOO",
+        "images": [
+          2,
+          4
+        ],
+        "sample_line": "DAEWOO",
+        "corrected_from": "",
+        "note": "品牌：图片中以完整分词命中『DAEWOO』（图 2、4）"
+      },
+      "model_match": {
+        "field": "型号",
+        "declared": "HS-8A50J-12",
+        "mode": "EXACT",
+        "token": "HS-8A50J-12",
+        "images": [
+          3
+        ],
+        "sample_line": "HS-8A50J-12 K1 007226",
+        "corrected_from": "",
+        "note": "型号：图片中以完整分词命中『HS-8A50J-12』（图 3）"
+      },
+      "old_reason": "型号：申报『HS-8A50J-12』与图片『HS-8AA』明确不一致",
+      "new_reason": "申报值与图片识别值一致，判合格；品牌：图片中以完整分词命中『DAEWOO』（图 2、4）；型号：图片中以完整分词命中『HS-8A50J-12』（图 3）",
+      "old_diffs": [
+        "型号：申报『HS-8A50J-12』与图片『HS-8AA』明确不一致"
+      ],
+      "new_diffs": []
+    }
+  ]
+}

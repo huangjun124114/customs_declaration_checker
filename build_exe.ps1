@@ -30,7 +30,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 # 交付版本（与 main.APP_VERSION / pyproject.version 对齐）
-$Version = "0.2.0"
+$Version = "0.3.0"
 # 分发包名（v0.2.0 点 10）
 $ZipName = "报关申报要素校验工具_v${Version}_0916.zip"
 

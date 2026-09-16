@@ -3,9 +3,15 @@
 人工复核工作台「左图右证据」中**左侧的产品实拍图**查看控件：
 
   * 支持**缩放**（滚轮 / 按钮 / 适应窗口 / 1:1）；
+  * 支持**旋转**（左旋 / 右旋 90°，v0.3.0 需求 2 —— 现场实拍图常见横竖拍颠倒）；
   * 支持**拖拽平移**（放大后按住鼠标左键拖动查看细节）；
   * 加载失败 / 路径为空时给出**明确占位提示**（🔵 缺图时**不加载任何图片**，
     只显示「缺图」文案 + 提示用户「标记待补图 + 备注」，见 FR：🔵 无图预览）。
+
+**v0.3.0 需求 2 —— 旋转**：``_rotation`` ∈ {0, 90, 180, 270}；渲染统一走
+:meth:`ImageViewer._display_pixmap`（= 旋转后的 pixmap），故 ``fit_to_window`` /
+``is_pannable`` 的尺寸判断天然跟随旋转结果，**不会出现"旋转后裁切/拖不动"**。
+换图（``load``）与清空（``clear`` / ``show_message``）自动复位为 0°。
 
 **v0.2.0 点 9.1 —— 拖动平移 bug 修复**（根因：布局自矛盾）：
 原先 ``setWidgetResizable(True)``（强制 label 拉伸到视口大小）与
@@ -27,7 +33,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QPoint, Qt, Signal
-from PySide6.QtGui import QMouseEvent, QPixmap, QResizeEvent, QWheelEvent
+from PySide6.QtGui import QMouseEvent, QPixmap, QResizeEvent, QTransform, QWheelEvent
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -44,6 +50,10 @@ __all__ = ["ImageViewer"]
 
 _MIN_SCALE = 0.05
 _MAX_SCALE = 12.0
+#: 旋转步长（度）
+_ROTATION_STEP = 90
+#: 旋转角度固定取值（0/90/180/270）
+_ROTATIONS = (0, 90, 180, 270)
 
 
 class ImageViewer(QFrame):
@@ -65,6 +75,8 @@ class ImageViewer(QFrame):
         self._pixmap: QPixmap | None = None
         self._scale: float = 1.0
         self._current_path: str = ""
+        #: 当前旋转角度（0/90/180/270，v0.3.0 需求 2）
+        self._rotation: int = 0
         #: 拖拽平移状态机（按下 → 移动 → 松手）
         self._dragging: bool = False
         self._drag_origin: QPoint = QPoint()
@@ -86,16 +98,34 @@ class ImageViewer(QFrame):
         self.btn_zoom_in = QPushButton("＋", self)
         self.btn_fit = QPushButton("适应窗口", self)
         self.btn_actual = QPushButton("1:1", self)
+        # v0.3.0 需求 2：旋转（现场实拍图横竖拍颠倒时摆正）
+        self.btn_rotate_left = QPushButton("↺ 左旋", self)
+        self.btn_rotate_right = QPushButton("↻ 右旋", self)
+        self.btn_rotate_left.setToolTip("逆时针旋转 90°")
+        self.btn_rotate_right.setToolTip("顺时针旋转 90°")
         self.btn_zoom_out.clicked.connect(lambda: self.zoom_by(1 / 1.25))
         self.btn_zoom_in.clicked.connect(lambda: self.zoom_by(1.25))
         self.btn_fit.clicked.connect(self.fit_to_window)
         self.btn_actual.clicked.connect(self.reset_zoom)
-        for btn in (self.btn_zoom_out, self.btn_zoom_in, self.btn_fit, self.btn_actual):
+        self.btn_rotate_left.clicked.connect(self.rotate_left)
+        self.btn_rotate_right.clicked.connect(self.rotate_right)
+        for btn in (
+            self.btn_zoom_out,
+            self.btn_zoom_in,
+            self.btn_fit,
+            self.btn_actual,
+            self.btn_rotate_left,
+            self.btn_rotate_right,
+        ):
             bar.addWidget(btn)
         self.scale_label = QLabel("100%", self)
         self.scale_label.setMinimumWidth(56)
         self.scale_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         bar.addWidget(self.scale_label)
+        self.rotation_label = QLabel("0°", self)
+        self.rotation_label.setMinimumWidth(40)
+        self.rotation_label.setToolTip("当前旋转角度")
+        bar.addWidget(self.rotation_label)
         outer.addLayout(bar)
 
         # 滚动区 + 图片标签
@@ -134,6 +164,7 @@ class ImageViewer(QFrame):
         self._pixmap = None
         self._current_path = ""
         self._dragging = False
+        self._reset_rotation()
         self.image_label.setPixmap(QPixmap())
         self.image_label.setText(text)
         self.path_label.setText("")
@@ -162,12 +193,58 @@ class ImageViewer(QFrame):
 
         self._pixmap = pix
         self._current_path = path
-        self.path_label.setText(f"路径：{path}　（{pix.width()}×{pix.height()}）")
+        # 换图 → **自动摆正**（需求 2：旋转不跨图记忆，避免上一张的角度误用）
+        self._reset_rotation()
+        self.path_label.setText(
+            f"路径：{path}　（{pix.width()}×{pix.height()}）"
+        )
         self._scale = 1.0
         self._render()
         # 首次加载自动适应窗口
         self.fit_to_window()
         return True
+
+    # ─────────────────────── 旋转（v0.3.0 需求 2）───────────────────────
+
+    def rotate_left(self) -> None:
+        """逆时针旋转 90°（左旋）。"""
+        self._rotate_by(-_ROTATION_STEP)
+
+    def rotate_right(self) -> None:
+        """顺时针旋转 90°（右旋）。"""
+        self._rotate_by(_ROTATION_STEP)
+
+    def current_rotation(self) -> int:
+        """返回当前旋转角度（0/90/180/270）。"""
+        return self._rotation
+
+    def _rotate_by(self, degrees: int) -> None:
+        """按角度增量旋转（无图时忽略；旋转后自动适应窗口避免旋出屏幕）。"""
+        if self._pixmap is None:
+            return
+        self._rotation = (self._rotation + int(degrees)) % 360
+        self._render()
+        self.fit_to_window()
+
+    def _reset_rotation(self) -> None:
+        """复位旋转角度为 0° 并刷新角度标签。"""
+        self._rotation = 0
+        if hasattr(self, "rotation_label"):
+            self.rotation_label.setText("0°")
+
+    def display_pixmap(self) -> QPixmap | None:
+        """返回**旋转后**的显示用 pixmap（无图时 ``None``）。
+
+        所有尺寸相关计算（缩放 / 适应窗口 / 可平移性）都基于它，
+        保证"旋转 → 尺寸变了 → 滚动条与拖动同步正确"。
+        """
+        if self._pixmap is None:
+            return None
+        if self._rotation % 360 == 0:
+            return self._pixmap
+        return self._pixmap.transformed(
+            QTransform().rotate(self._rotation), Qt.TransformationMode.SmoothTransformation
+        )
 
     def zoom_by(self, factor: float) -> None:
         """按倍数缩放（相对当前）。"""
@@ -184,12 +261,13 @@ class ImageViewer(QFrame):
         self._render()
 
     def fit_to_window(self) -> None:
-        """缩放到适应可视区。"""
-        if self._pixmap is None:
+        """缩放到适应可视区（基于**旋转后**尺寸）。"""
+        pixmap = self.display_pixmap()
+        if pixmap is None:
             return
         viewport = self.scroll.viewport().size()
-        pw = max(1, self._pixmap.width())
-        ph = max(1, self._pixmap.height())
+        pw = max(1, pixmap.width())
+        ph = max(1, pixmap.height())
         avail_w = max(1, viewport.width() - 8)
         avail_h = max(1, viewport.height() - 8)
         self._scale = max(_MIN_SCALE, min(_MAX_SCALE, min(avail_w / pw, avail_h / ph)))
@@ -220,12 +298,13 @@ class ImageViewer(QFrame):
     # ─────────────────────── 内部 ───────────────────────
 
     def _render(self) -> None:
-        """按当前缩放渲染图片。"""
-        if self._pixmap is None:
+        """按当前缩放渲染图片（**旋转后**的 pixmap）。"""
+        pixmap = self.display_pixmap()
+        if pixmap is None:
             return
-        pw = max(1, int(self._pixmap.width() * self._scale))
-        ph = max(1, int(self._pixmap.height() * self._scale))
-        scaled = self._pixmap.scaled(
+        pw = max(1, int(pixmap.width() * self._scale))
+        ph = max(1, int(pixmap.height() * self._scale))
+        scaled = pixmap.scaled(
             pw,
             ph,
             Qt.AspectRatioMode.KeepAspectRatio,
@@ -237,6 +316,7 @@ class ImageViewer(QFrame):
         # 超出视口时滚动条随即出现（不再被 WidgetResizable 反向拉伸覆盖）。
         self.image_label.resize(scaled.size())
         self.scale_label.setText(f"{int(round(self._scale * 100))}%")
+        self.rotation_label.setText(f"{self._rotation}°")
         self._apply_cursor()
 
     def _apply_cursor(self) -> None:
@@ -329,11 +409,12 @@ class ImageViewer(QFrame):
         super().wheelEvent(event)
 
     def clear(self) -> None:
-        """清空并复位。"""
+        """清空并复位（含旋转角度）。"""
         self._pixmap = None
         self._current_path = ""
         self._scale = 1.0
         self._dragging = False
+        self._reset_rotation()
         self.image_label.setPixmap(QPixmap())
         self.image_label.setText("（未选择记录）")
         self.path_label.setText("")

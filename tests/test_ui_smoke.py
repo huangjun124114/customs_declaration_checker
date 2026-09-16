@@ -227,8 +227,12 @@ def test_workbench_rejudge_idempotent(window) -> None:
     assert window.session.get(res.key).reviewer_note == "改异常"
 
 
-def test_workbench_lists_only_review_verdicts(window) -> None:
-    """工作台默认只列待复核（⚠️ + 🔵）。"""
+def test_workbench_lists_all_records_with_status_counts(window) -> None:
+    """v0.3.0：工作台默认列**全部**记录（不再是「只列待复核」）。
+
+    「谁要复核」由状态标签（成功/待复核/缺图/失败，带数量）与头部
+    「待复核：N 条」承载，避免把 ⚠️/🔵 之外的问题记录静默隐藏。
+    """
     from core.models import CheckResult, DeclarationRecord, Verdict
 
     window.session.clear()
@@ -240,7 +244,10 @@ def test_workbench_lists_only_review_verdicts(window) -> None:
         results.append(CheckResult(key=rec.key(), record=rec, verdict=verdict))
     window.session.replace(results, ticket_no="T")
     window.workbench.set_session(window.session)
-    assert window.workbench.record_list.count() == 2
+    assert window.workbench.record_table.rowCount() == 4
+    assert window.workbench.review_pending_count() == 2
+    assert window.workbench.status_buttons["all"].text() == "全部 4"
+    assert window.workbench.status_buttons[Verdict.NO_MARK.value].text() == "待复核 1"
 
 
 def test_image_viewer_missing_image_shows_hint(window) -> None:

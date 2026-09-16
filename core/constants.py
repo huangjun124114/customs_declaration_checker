@@ -24,6 +24,8 @@ __all__ = [
     "VERDICT_NO_IMAGE",
     "VERDICT_TEXT",
     "VERDICT_LABELS",
+    "FIELD_BRAND",
+    "FIELD_MODEL",
     "verdict_text",
     "verdict_label",
     "ALL_VERDICTS",
@@ -85,9 +87,15 @@ VERDICT_LABELS: dict[Verdict, str] = {
     Verdict.NO_IMAGE: "缺图·复核",
 }
 
+#: 字段名（**唯一来源**）——``CheckResult.token_matches`` 的 ``TokenMatch.field``
+#: 取值、差异明细的 ``field`` 取值、UI 判定链路三列的「要素」列**全部引用此表**。
+#: ``core/judge_engine.py`` 的 ``_FIELD_BRAND`` / ``_FIELD_MODEL`` 只是别名，
+#: 由 ``tests/test_constants.py`` 断言二者一致，防字面量漂移。
+FIELD_BRAND: str = "品牌"
+FIELD_MODEL: str = "型号"
+
 #: 全部判定（固定顺序，供 UI 四卡与统计遍历）
-ALL_VERDICTS: tuple[Verdict, ...] = (
-    Verdict.PASS,
+ALL_VERDICTS: tuple[Verdict, ...] = (    Verdict.PASS,
     Verdict.FAIL,
     Verdict.NO_MARK,
     Verdict.NO_IMAGE,

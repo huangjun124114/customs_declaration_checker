@@ -1,0 +1,19 @@
+{
+  "ticket_no": "SA26090215",
+  "elapsed_sec": 181.2,
+  "total": 18,
+  "processed": 18,
+  "counts": {
+    "PASS": 7,
+    "FAIL": 7,
+    "NO_MARK": 4,
+    "NO_IMAGE": 0
+  },
+  "output_paths": {
+    "summary": "D:\\Data\\workspace\\workdoc\\AI测试\\customs_declaration_checker\\报关申报要素校验\\result\\校验汇总表_SA26090215.xlsx",
+    "review": "D:\\Data\\workspace\\workdoc\\AI测试\\customs_declaration_checker\\报关申报要素校验\\result\\SA26090215_待人工复核清单.csv",
+    "detail": "D:\\Data\\workspace\\workdoc\\AI测试\\customs_declaration_checker\\报关申报要素校验\\logs\\校验详细日志_SA26090215_累积.json"
+  },
+  "input_files": 130,
+  "input_bytes": 394140543
+}

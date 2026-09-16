@@ -10,16 +10,19 @@ SOP 1.3 四类判定口径与 SOP 3.4 比对 5 条，产出 :class:`core.models.
     判定在 T04"的单向依赖）。
   * ``record.raw_element_text`` 的合法用途**仅限**：填充 ``DifferenceDetail`` 的
     证据回溯串与 ``CheckResult.evidence_text`` 片段；**不得**作为比对算法输入。
-  * 图片侧取值从 ``ocr_texts`` 提取；完整 OCR 原文**只进 JSON**（不进日志）。
+  * 图片侧取值：**v0.3.0 起以「申报值是否在 OCR 全文里以完整分词出现」为主取证**
+    （:class:`core.token_matcher.TokenMatcher`）；``extract_detected_brand`` /
+    ``extract_detected_model`` **降级**为「图内是否存在同类标识」的判据与展示值。
+  * 完整 OCR 原文**只进 JSON**（不进日志）。
 
-## SOP 3.4 比对 5 条 → 实现映射
+## SOP 3.4 比对 5 条 → 实现映射（v0.3.0）
 
     ============================================  ==============================
     SOP 3.4 规则                                  实现分支
     ============================================  ==============================
     ① 双方均为无/空 → 合格                        ``_both_absent``
-    ② 双方均有值且一致 → 合格                     ``DEFINITE_MATCH``
-    ③ 有值但不一致 → 异常                         ``CLEAR_MISMATCH``
+    ② 申报值在图中以完整分词出现 → 合格            ``TokenMatcher`` 命中（EXACT/FUZZY）
+    ③ 图内有同类标识但值不同 → 异常                两级分流 → ``MISMATCH``
     ④ 申报缺失但图片明确有 → 异常                 ``detected 有值 且 declared 无``
     ⑤ 型号不一致须列逐字符差异                    :mod:`core.diff_util`
     ============================================  ==============================
@@ -28,7 +31,16 @@ SOP 1.3 四类判定口径与 SOP 3.4 比对 5 条，产出 :class:`core.models.
 **严禁**直达 ``Verdict.FAIL``（❌）—— 由 :meth:`JudgeEngine.judge` 末尾的
 "降级护栏"统一保证（架构设计 12.R5②）。
 
-**口径声明**：本模块**不新增、不改写、不弱化**任何 SOP 判定口径。
+## ⚠️ 口径变更声明（v0.3.0，2026-09-16 用户拍板）
+
+本模块**首次**改动判定主链路：由「**先提取、后比对**」改为「**完整分词直接命中**」。
+变更范围**严格限定**在"字段状态如何产生"（:meth:`JudgeEngine._field_state_v03`）：
+
+  * **不变**：图片证据闸门（🔵）、整机品牌保留 ❌（T06 裁决 A′）、记录级跨文字体系兜底、
+    ``SUSPICIOUS`` 降级护栏、四类口径字符串、13 列汇总表结构、:mod:`core.noise_guard`
+    的比对语义（``classify_detail`` 仍作为**未命中时的兜底三态**继续生效）；
+  * **变更**：取证方式 —— 命中判定不再依赖"猜出图片侧字段值"，消除 OCR 无空间感知
+    带来的 key-value 缺失误判。新基线须实测确立（见 ``docs/10_迭代方案_v0.3_0916.md``）。
 """
 
 from __future__ import annotations
@@ -48,6 +60,7 @@ from core.models import (
 )
 from core.noise_guard import NoiseGuard, is_none_token
 from core.rule_repository import RuleRepository
+from core.token_matcher import TokenMatch, TokenMatcher
 from infra.logger import Phase, get_logger
 
 __all__ = [
@@ -61,23 +74,24 @@ __all__ = [
 ]
 
 
-#: 品牌字段名（差异明细展示用）
-_FIELD_BRAND = "品牌"
-#: 型号字段名（差异明细展示用）
-_FIELD_MODEL = "型号"
+#: 品牌字段名（**别名** —— 唯一来源是 :data:`core.constants.FIELD_BRAND`，
+#: 供差异明细 / ``TokenMatch.field`` / UI 三列表共用，由 ``test_constants.py`` 锁一致）
+_FIELD_BRAND = constants.FIELD_BRAND
+#: 型号字段名（同上）
+_FIELD_MODEL = constants.FIELD_MODEL
 
 # ── 字段级状态常量（SOP 3.4 规则①②③④ 的字段级落点）──
 #: 双方均为"无" → 合格
 _FIELD_BOTH_ABSENT = "BOTH_ABSENT"
-#: 双方均有值且一致 → 合格
+#: 申报值在图中以**完整分词**命中（v0.3.0 主路径）→ 合格
 _FIELD_MATCH = "MATCH"
 #: 疑似噪声 → ⚠️（绝不 ❌，不虚高红线）
 _FIELD_SUSPICIOUS = "SUSPICIOUS"
-#: 图片侧无标识（申报有值但图内无该文字）→ ⚠️ 缺图内标识
+#: 图片侧无**同类标识**（申报有值，但图内无该文字）→ ⚠️ 缺图内标识
 _FIELD_DETECTED_MISSING = "DETECTED_MISSING"
 #: 申报缺失但图片明确有 → ❌
 _FIELD_DECLARED_MISSING = "DECLARED_MISSING"
-#: 双方有值但不一致 → ❌
+#: 图内有**同类标识**但值不同（两级分流的 ❌ 分支）→ ❌
 _FIELD_MISMATCH = "MISMATCH"
 
 #: 品牌值不得是这些字段名/标签（避免跨标签误捕，如 ``品牌: 型号:``）
@@ -592,6 +606,40 @@ def _normalize(value: str) -> str:
     return ("" if value is None else str(value)).strip()
 
 
+def _match_reasons(
+    state: str,
+    match: TokenMatch | None,
+    field_name: str,
+) -> list[str]:
+    """把一条字段的完整分词取证说明附进判定理由（v0.3.0 可追溯）。
+
+    只在"说明能解释结论"时附：
+
+      * ``BOTH_ABSENT`` / ``DECLARED_MISSING`` → 不附（由差异明细承载，避免噪声）；
+      * ``MATCH`` 走**兼容路径**（未命中却因旧链路一致性判 ✅）→ 不附（说明会自相矛盾）；
+      * 其余（命中 ✅ / 未命中 ⚠️ / ❌）→ 附 :attr:`core.token_matcher.TokenMatch.note`。
+
+    Args:
+        state: 字段状态常量（:data:`_FIELD_*`）。
+        match: 完整分词匹配结果。
+        field_name: 字段名（保留参数，供未来细分文案）。
+
+    Returns:
+        待追加的说明列表（通常 0–1 条）。
+    """
+    del field_name  # 说明文案由 TokenMatch 自带（含字段名），此处无需重复
+    if match is None:
+        return []
+    if state in (_FIELD_BOTH_ABSENT, _FIELD_DECLARED_MISSING):
+        return []
+    note = (getattr(match, "note", "") or "").strip()
+    if not note:
+        return []
+    if state == _FIELD_MATCH and not match.hit:
+        return []
+    return [note]
+
+
 class JudgeEngine:
     """四类口径判定引擎（架构设计第 4 节 ``JudgeEngine``）。
 
@@ -697,14 +745,24 @@ class JudgeEngine:
             gate.evidence_images = result.evidence_images
             return gate
 
-        # ── ②③ 品牌 / 型号比对 ──
+        # ── ②③ 品牌 / 型号取证与比对 ──
         declared_brand = _normalize(record.decl_brand if record is not None else "")
         declared_model = _normalize(record.decl_model if record is not None else "")
 
+        # 图片侧「同类标识」判据 + 展示值（v0.3.0：降级为**辅助**，不再是取证主路径）。
+        #   * 用途 1：两级分流 —— 命中失败时判断"图内到底有没有同类标识"；
+        #   * 用途 2：整机品牌上下文判定（需 detected_brand 作定位键）；
+        #   * 用途 3：13 列汇总表「图片识别品牌/型号」列与旧结果集回退展示。
         detected_brand = extract_detected_brand(texts, self._repo)
         detected_model = extract_detected_model(texts)
         result.detected_brand = detected_brand
         result.detected_model = detected_model
+
+        # ★ v0.3.0 主取证：申报值是否在 OCR 全文里以**完整分词**出现。
+        matcher = TokenMatcher(texts, rules=self._repo)
+        brand_match = matcher.match(declared_brand, field=_FIELD_BRAND)
+        model_match = matcher.match(declared_model, field=_FIELD_MODEL)
+        result.token_matches = [brand_match, model_match]
 
         # 整机上下文判定：**逐图**判定（缺陷 B 约束：检索范围限定在同一张图内）——
         # 任一图命中即视为整机品牌。绝不把不同图的行拼接后检索（防跨图污染）。
@@ -742,14 +800,22 @@ class JudgeEngine:
             and model_verdict.level != NoiseLevel.SUSPICIOUS
         ):
             target = self._pick_noise_target(f"{declared_brand}", f"{declared_model}")
-            if brand_verdict.level == NoiseLevel.CLEAR_MISMATCH or not detected_brand:
+            # ⚠️ v0.3.0：**已完整分词命中的字段不受记录级兜底影响**
+            #   —— 命中是"直接证据"（申报值确实出现在 OCR 全文里），
+            #      优先于"跨文字体系"这类**近似推断**；否则新口径下
+            #      「申报『宇同』+ 图内出现『宇同』」会被兜底误降级为 ⚠️。
+            if not brand_match.hit and (
+                brand_verdict.level == NoiseLevel.CLEAR_MISMATCH or not detected_brand
+            ):
                 brand_verdict.level = NoiseLevel.SUSPICIOUS
                 brand_verdict.signals.append("record_level_noise")
                 brand_verdict.reason = (
                     f"{_FIELD_BRAND}：整段 OCR 命中已知噪声样本 / 存在跨文字体系比对，"
                     "疑似整体误读，转人工复核"
                 )
-            if model_verdict.level == NoiseLevel.CLEAR_MISMATCH or not detected_model:
+            if not model_match.hit and (
+                model_verdict.level == NoiseLevel.CLEAR_MISMATCH or not detected_model
+            ):
                 model_verdict.level = NoiseLevel.SUSPICIOUS
                 model_verdict.signals.append("record_level_noise")
                 if not model_verdict.reason or target:
@@ -765,6 +831,8 @@ class JudgeEngine:
             declared_model,
             detected_model,
             model_verdict,
+            brand_match=brand_match,
+            model_match=model_match,
         )
 
         result.verdict = verdict
@@ -906,31 +974,35 @@ class JudgeEngine:
         declared_model: str,
         detected_model: str,
         model_verdict: Any,
+        brand_match: TokenMatch | None = None,
+        model_match: TokenMatch | None = None,
     ) -> tuple[Verdict, list[DifferenceDetail], NoiseLevel, str]:
         """按 SOP 1.3 / 3.4 生成四类判定 + 差异明细。
 
-        **SOP 3.4 比对 5 条 → 结论映射（逐条实现）**：
+        **SOP 3.4 比对 5 条 → 结论映射（v0.3.0 逐条实现）**：
 
-        ==========================================  ==========================
-        字段状态                                    对整条记录结论的贡献
-        ==========================================  ==========================
+        ============================================  ==========================
+        字段状态                                      对整条记录结论的贡献
+        ============================================  ==========================
         双方均为无/空                                 → 合格
-        双方均有值且一致                              → 合格
+        申报值在图中以完整分词出现（EXACT/FUZZY）      → 合格
         ``SUSPICIOUS``（疑罪从无）                    → ⚠️（绝不 ❌）
-        图片侧无标识（申报有值、识别值空）            → ⚠️ 缺图内标识（**非 ❌**）
+        图内无**同类标识**（两级分流·无证据）          → ⚠️ 缺图内标识（**非 ❌**）
+        图内有同类标识但值不同（两级分流·有证据）      → ❌ 校验异常
         申报缺失但图片明确有                          → ❌ 校验异常
-        双方有值但不一致（CLEAR_MISMATCH）            → ❌ 校验异常
-        ==========================================  ==========================
+        ============================================  ==========================
 
         整条记录取"最严重"者：❌ > ⚠️ > ✅。
 
         Args:
             declared_brand: 申报品牌。
-            detected_brand: 图片识别品牌。
+            detected_brand: 图片识别品牌（v0.3.0：两级分流的"同类标识"判据）。
             brand_verdict: 品牌字段的 :class:`core.noise_guard.NoiseVerdict`。
             declared_model: 申报型号。
             detected_model: 图片识别型号。
             model_verdict: 型号字段的 :class:`core.noise_guard.NoiseVerdict`。
+            brand_match: 品牌完整分词匹配结果（v0.3.0 主取证）。
+            model_match: 型号完整分词匹配结果。
 
         Returns:
             ``(verdict, differences, noise_level, reason)``。
@@ -938,8 +1010,12 @@ class JudgeEngine:
         differences: list[DifferenceDetail] = []
         reasons: list[str] = []
 
-        brand_state = self._field_state(declared_brand, detected_brand, brand_verdict)
-        model_state = self._field_state(declared_model, detected_model, model_verdict)
+        brand_state = self._field_state_v03(
+            declared_brand, detected_brand, brand_verdict, brand_match
+        )
+        model_state = self._field_state_v03(
+            declared_model, detected_model, model_verdict, model_match
+        )
 
         # ── 差异明细（不一致 / 缺失时写；型号必须带逐字符差异）──
         if brand_state in (_FIELD_MISMATCH, _FIELD_SUSPICIOUS, _FIELD_DECLARED_MISSING):
@@ -1014,11 +1090,78 @@ class JudgeEngine:
             else:
                 reasons.append("申报值与图片识别值一致，判合格")
 
+        # ── v0.3.0 可追溯：附上完整分词匹配的取证说明（✅/⚠️ 均写，❌ 由差异明细承载）──
+        reasons.extend(
+            _match_reasons(brand_state, brand_match, _FIELD_BRAND)
+        )
+        reasons.extend(
+            _match_reasons(model_state, model_match, _FIELD_MODEL)
+        )
+
         return verdict, differences, noise_level, "；".join(r for r in reasons if r)
+
+    @classmethod
+    def _field_state_v03(
+        cls,
+        declared: str,
+        detected: str,
+        verdict: Any,
+        match: TokenMatch | None = None,
+    ) -> str:
+        """判定单字段状态（**v0.3.0 口径**：完整分词命中为主取证）。
+
+        判定顺序（顺序本身即"不虚高"的实现）：
+
+          1. **申报侧为「无」/空** → 沿用旧链路 :meth:`_field_state`
+             （规则①「双方均为无 → ✅」/ 规则④「申报无但图内有 → ❌」语义**不变**）；
+          2. **完整分词命中**（``EXACT`` / ``FUZZY``）→ ``MATCH``（✅）；
+          3. **未命中 且 疑似噪声** → ``SUSPICIOUS``（⚠️，**绝不 ❌**）；
+          4. **未命中 但 申报值与图片识别值一致**（旧链路等价证据，兼容保留）→ ``MATCH``；
+          5. **两级分流**：图内**有同类标识**但值不同 → ``MISMATCH``（❌，有证据）；
+             图内**根本没有**该类标识 → ``DETECTED_MISSING``（⚠️，没找到证据）。
+             —— 「有证据不一致」与「没找到证据」不可混淆（SOP 1.3 红线）。
+
+        Args:
+            declared: 申报值。
+            detected: 图片识别值（v0.3.0：作为"图内是否有同类标识"的判据）。
+            verdict: 字段的 :class:`core.noise_guard.NoiseVerdict`（未命中时的兜底三态）。
+            match: 完整分词匹配结果；``None`` 时等价于未命中。
+
+        Returns:
+            字段状态常量之一（:data:`_FIELD_*`）。
+        """
+        # ① 申报侧为「无」→ 旧链路语义（规则① / 规则④）完全不变
+        if is_none_token(declared):
+            return cls._field_state(declared, detected, verdict)
+
+        # ② 完整分词命中 → 合格（v0.3.0 主路径）
+        if match is not None and match.hit:
+            return _FIELD_MATCH
+
+        # ③ 未命中但疑似噪声 → ⚠️（不虚高红线优先于"未命中即异常"）
+        level = getattr(verdict, "level", NoiseLevel.DEFINITE_MATCH)
+        if level == NoiseLevel.SUSPICIOUS:
+            return _FIELD_SUSPICIOUS
+
+        detected_absent = is_none_token(detected)
+
+        # ④ 兼容：申报值与图片侧识别值一致（旧链路的等价证据）→ 合格
+        if level == NoiseLevel.DEFINITE_MATCH and not detected_absent:
+            return _FIELD_MATCH
+
+        # ⑤ 两级分流
+        if not detected_absent:
+            return _FIELD_MISMATCH
+        return _FIELD_DETECTED_MISSING
 
     @staticmethod
     def _field_state(declared: str, detected: str, verdict: Any) -> str:
         """判定单字段状态（SOP 3.4 规则①②③④ 的字段级落点）。
+
+        ⚠️ v0.3.0 起本方法**只在"申报侧为无/空"时**由
+        :meth:`_field_state_v03` 调用（规则①「双方均为无 → ✅」与规则④
+        「申报缺失但图片明确有 → ❌」的语义**完全不变**）；申报侧有值时的取证
+        已改走「完整分词命中」，见 :meth:`_field_state_v03`。
 
         Args:
             declared: 申报值。

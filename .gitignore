@@ -36,6 +36,10 @@ resume_*.json
 校验运行日志_*.log
 *.log
 
+# ── 构建 / 跑批临时日志（工具输出，非源码）──
+build_log_*.txt
+run_log_*.txt
+
 # ── 本机调试残留（非源码，禁止入库）──
 .p2_env.txt
 .p2_out.txt
