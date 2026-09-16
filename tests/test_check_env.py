@@ -404,3 +404,75 @@ class TestR11HardeningCoverage:
         top_levels = {name.split(".")[0] for name in checks}
         for _dist, import_name, *_ in check_env.CRITICAL_DEPS:
             assert import_name in top_levels, f"{import_name} 未纳入 import 验证"
+
+
+class TestFrozenRuntime:
+    """打包态（PyInstaller）适配回归锁。
+
+    实战背景（2026-09-16，exe 冒烟）：
+      * onefile 会把依赖平铺解到 ``sys._MEIPASS``，该目录语义上等价 site-packages；
+        若不优先识别，``find_site_packages`` 会顺着 ``sys.path`` 摸到**宿主机**的
+        site-packages，体检结论与本次交付毫无关系。
+    """
+
+    def test_meipass_takes_priority(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """存在 ``sys._MEIPASS`` 时必须返回它，而不是宿主机 site-packages。"""
+        fake_bundle = tmp_path / "_MEI123456"
+        fake_bundle.mkdir()
+        monkeypatch.setattr(sys, "_MEIPASS", str(fake_bundle), raising=False)
+        assert check_env.find_site_packages() == fake_bundle
+
+    def test_empty_meipass_is_ignored(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``_MEIPASS`` 指向不存在的目录时不得返回它（回退到常规探测）。"""
+        monkeypatch.setattr(sys, "_MEIPASS", "/nonexistent/_MEI999", raising=False)
+        assert check_env.find_site_packages() != Path("/nonexistent/_MEI999")
+
+    def test_explicit_arg_still_wins(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """显式传入的目录优先级最高（测试注入伪造目录依赖此语义）。"""
+        fake_bundle = tmp_path / "_MEI123456"
+        fake_bundle.mkdir()
+        monkeypatch.setattr(sys, "_MEIPASS", str(fake_bundle), raising=False)
+        explicit = tmp_path / "explicit_sp"
+        explicit.mkdir()
+        assert check_env.find_site_packages(str(explicit)) == explicit
+
+
+class TestFrozenScanNotApplicable:
+    """打包态下第 3 节「空壳包检测」必须**明说不适用**，而不是误报。
+
+    实战背景（2026-09-16，exe 冒烟第二轮）：``exe --check-env`` 修好脚本定位后，
+    立刻把 exe 自己的 ``_MEIPASS`` 扫成 13 个"残缺包"（``PySide6`` / ``numpy`` /
+    ``PIL`` / ``rules`` / ``ui`` …）并 exit 1 —— 全是误报。
+
+    根因：PyInstaller 把纯 Python 模块编译进 **PYZ 归档**，``_MEIPASS`` 里只落地
+    二进制扩展与数据文件，于是「有文件但无 ``__init__.py``」这条判据在打包态
+    **根本不成立**。必须靠 ``sys.frozen`` 区分运行形态。
+    """
+
+    def test_reason_recorded_when_frozen(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        report = check_env.run_check(site_packages=None, skip_imports=True)
+        assert report.scan_skipped_reason, "打包态必须记录跳过的原因"
+        assert not report.fatal, "打包态跳过扫描不得被判为致命"
+        assert "PYZ" in report.scan_skipped_reason or "打包态" in report.scan_skipped_reason
+
+    def test_reason_absent_in_dev_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delattr(sys, "frozen", raising=False)
+        report = check_env.run_check(site_packages=None, skip_imports=True)
+        assert report.scan_skipped_reason == ""
+
+    def test_explicit_scan_dir_is_still_honored(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """显式传目录时（测试注入伪造目录）不受打包态影响，仍真扫。"""
+        (tmp_path / "bogus_pkg").mkdir()
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        report = check_env.run_check(str(tmp_path), skip_imports=True)
+        assert report.scan_skipped_reason == ""
+        assert [pkg.name for pkg in report.issues] == ["bogus_pkg"]
+
+    def test_render_shows_skip_marker(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        report = check_env.run_check(site_packages=None, skip_imports=True)
+        text = report.render()
+        assert "SKIP" in text
+        assert "不适用" in text
+        assert "打包态" in text

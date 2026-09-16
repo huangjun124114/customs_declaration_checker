@@ -36,6 +36,53 @@ class TestForceUtf8:
         force_utf8_encoding()
         assert os.environ["PYTHONUTF8"] == "0"
 
+    def test_reconfigures_already_open_streams_to_utf8(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """回归锁：必须**重配已打开的 std 流**，不能只设环境变量。
+
+        实战背景（2026-09-16，exe 冒烟）：``PYTHONIOENCODING`` 只对之后创建的流
+        生效；进程启动时 std 流已按简体中文 Windows 的 ANSI 代码页（GBK）建好，
+        于是 exe 的 ``--self-test`` 在 ``print("✅ 校验合格")`` 处抛
+        ``UnicodeEncodeError`` —— 断言全过却返回退出码 1。
+        """
+        import io
+        import sys
+
+        # 模拟"已按 GBK 建好"的 stdout
+        raw = io.BytesIO()
+        gbk_stream = io.TextIOWrapper(raw, encoding="gbk", newline="")
+        monkeypatch.setattr(sys, "stdout", gbk_stream)
+
+        force_utf8_encoding()
+
+        assert sys.stdout.encoding.lower().replace("-", "") == "utf8"
+        # 关键行为：含 emoji 的中文口径字符串必须能打印出来
+        print("✅ 校验合格")
+        sys.stdout.flush()
+        assert raw.getvalue().decode("utf-8") == "✅ 校验合格\n"
+
+    def test_tolerates_missing_streams(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """窗口模式（console=False）下 std 流可能为 None —— 不得因此崩溃。"""
+        import sys
+
+        monkeypatch.setattr(sys, "stdout", None)
+        monkeypatch.setattr(sys, "stderr", None)
+        force_utf8_encoding()  # 不抛异常即通过
+
+    def test_tolerates_stream_without_reconfigure(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """被替换成非 TextIOWrapper 的对象（如 pytest capture）时不得崩溃。"""
+        import sys
+
+        class _NoReconfigure:
+            def write(self, _text: str) -> int:
+                return 0
+
+        monkeypatch.setattr(sys, "stdout", _NoReconfigure())
+        force_utf8_encoding()  # 不抛异常即通过
+
 
 class TestNormalizePath:
     """路径规范化（Qt file:/// 前缀 + 盘符 + UNC）。"""

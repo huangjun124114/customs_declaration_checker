@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -42,9 +43,42 @@ def force_utf8_encoding() -> None:
     行为：
       * ``PYTHONUTF8=1``         —— 开启 Python UTF-8 模式（PEP 540）。
       * ``PYTHONIOENCODING=utf-8`` —— 强制 stdin/stdout/stderr 使用 UTF-8。
+      * **重配已打开的 std 流**（见 :func:`_reconfigure_std_streams`）——
+        环境变量只对「之后创建」的解释器/流生效，对**当前进程已建好的**
+        std 流无效，必须显式 ``reconfigure``。
     """
     os.environ.setdefault("PYTHONUTF8", "1")
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    _reconfigure_std_streams()
+
+
+def _reconfigure_std_streams() -> None:
+    """把**当前进程已打开的** stdin/stdout/stderr 重配为 UTF-8。
+
+    为什么必须做：``PYTHONIOENCODING`` 只影响之后创建的流。进程启动时
+    std 流已按系统 ANSI 代码页建好 —— 简体中文 Windows 上是 **GBK** ——
+    此时 ``print("✅ 校验合格")`` 会抛 ``UnicodeEncodeError``。
+
+    打包成窗口程序（``console=False``）后更易踩到：实测 exe 的 ``--self-test``
+    就因打印 ``✅`` 而失败（断言全过，却返回退出码 1，误导排错方向）。
+
+    ``errors="replace"``：控制台输出**绝不能**因编码问题崩掉程序，
+    个别字符降级成 ``?`` 远好过整个 CLI 命令失败。
+    """
+    for name in ("stdin", "stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        if stream is None:
+            # 窗口模式（pythonw / PyInstaller console=False）下无控制台，
+            # 标准流可能为 None；此时 print 会静默丢弃，属预期。
+            continue
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            # 流已被重定向成非文本对象（如 pytest 的 capture）时忽略
+            pass
 
 
 def normalize_path(path: str | os.PathLike[str]) -> Path:

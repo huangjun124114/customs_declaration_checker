@@ -18,10 +18,13 @@ from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_sub
 
 block_cipher = None
 
-# ── 数据文件：规则 YAML + 样式表 ──────────────────────────────────
+# ── 数据文件：规则 YAML + 样式表 + 环境体检脚本 ────────────────────
 datas = []
 datas += [("rules", "rules")]
 datas += [("ui/styles/app.qss", "ui/styles")]
+# tools/check_env.py 必须随包 —— 它是 ``exe --check-env`` 的实现，
+# 也是现场排查「exe 自身体检」的唯一手段（main._run_env_check 走 bundle_root() 查找）。
+datas += [("tools/check_env.py", "tools")]
 
 # ── rapidocr：模型 + 配置（R1 关键，漏收会 ModelNotFound）─────────
 rapidocr_datas, rapidocr_binaries, rapidocr_hiddenimports = collect_all("rapidocr")

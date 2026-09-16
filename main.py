@@ -196,13 +196,38 @@ def _run_self_test(log) -> int:
 def _run_env_check() -> int:
     """``--check-env``：调用环境体检脚本后退出。
 
+    Note:
+        必须同时兼容三种布局，否则**打包后会静默失效**（且窗口模式下
+        未捕获异常会弹出模态错误框把进程挂死，现场看起来就是"命令没反应"）：
+
+        * onefile 打包态  → ``tools/check_env.py`` 随包解到 ``bundle_root()``（``_MEIPASS``）
+        * 目录形式打包态  → ``tools/`` 与 exe 同目录，即 ``app_base_dir() / "tools"``
+        * 开发态          → ``__file__`` 所在目录下的 ``tools/``
+
     Returns:
-        ``tools/check_env.py`` 的退出码。
+        ``tools/check_env.py`` 的退出码；脚本不可用时返回 ``1``。
     """
-    tools_dir = Path(__file__).resolve().parent / "tools"
+    from infra.resources import app_base_dir, bundle_root
+
+    candidates = [
+        bundle_root() / "tools",  # onefile：随包解出
+        app_base_dir() / "tools",  # 目录形式 / 现场工程师手放的 tools/
+        Path(__file__).resolve().parent / "tools",  # 开发态
+    ]
+    tools_dir = next((p for p in candidates if (p / "check_env.py").is_file()), None)
+    if tools_dir is None:
+        print("环境体检不可用：未找到 tools/check_env.py")
+        print("  已尝试：")
+        for candidate in candidates:
+            print(f"    - {candidate}")
+        return 1
+
     sys.path.insert(0, str(tools_dir))
     try:
         import check_env  # type: ignore[import-not-found]
+    except Exception as exc:  # noqa: BLE001 - CLI 必须给出可读失败原因而非堆栈
+        print(f"环境体检不可用：导入 check_env 失败 - {type(exc).__name__}: {exc}")
+        return 1
     finally:
         try:
             sys.path.remove(str(tools_dir))

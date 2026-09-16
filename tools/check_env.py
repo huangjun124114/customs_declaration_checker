@@ -142,6 +142,8 @@ class CheckReport:
     import_failures: list[tuple[str, str]] = field(default_factory=list)
     version_warnings: list[str] = field(default_factory=list)
     ok_versions: list[str] = field(default_factory=list)
+    #: 打包态下空壳包扫描被跳过的原因（非空表示"该节不适用"，**不计入 fatal**）
+    scan_skipped_reason: str = ""
 
     @property
     def fatal(self) -> bool:
@@ -156,6 +158,7 @@ class CheckReport:
         lines.append("=" * 68)
         lines.append(f"site-packages: {self.site_packages}")
         lines.append(f"Python: {sys.version.split()[0]}  ({sys.executable})")
+        lines.append(f"运行形态: {'PyInstaller 打包态（exe）' if is_frozen() else '源码/开发态'}")
         lines.append("")
 
         lines.append(f"[1/3] 关键依赖版本核对（{len(self.ok_versions)} 项通过）")
@@ -174,7 +177,10 @@ class CheckReport:
         lines.append("")
 
         lines.append("[3/3] 空壳包检测（无 __init__.py 且无 dist-info）")
-        if self.issues:
+        if self.scan_skipped_reason:
+            # 打包态：该节**不适用**，必须明说而不是报警（否则全是误报）
+            lines.append(f"       SKIP 本节不适用：{self.scan_skipped_reason}")
+        elif self.issues:
             empty_count = sum(1 for pkg in self.issues if pkg.kind == "完全空目录")
             broken_count = len(self.issues) - empty_count
             lines.append(
@@ -198,6 +204,8 @@ class CheckReport:
             lines.append("体检结论：不通过 ✗  禁止打包（exit 1）")
         elif self.version_warnings:
             lines.append("体检结论：通过（有警告）⚠  建议核对版本（exit 2）")
+        elif is_frozen():
+            lines.append("体检结论：通过 ✓  exe 自检正常（exit 0）")
         else:
             lines.append("体检结论：通过 ✓  可继续打包（exit 0）")
         lines.append("=" * 68)
@@ -207,6 +215,11 @@ class CheckReport:
 # ══════════════════════════════════════════════════════════════════
 #  检测逻辑
 # ══════════════════════════════════════════════════════════════════
+
+
+def is_frozen() -> bool:
+    """当前是否运行在 PyInstaller 打包态。"""
+    return bool(getattr(sys, "frozen", False))
 
 
 def find_site_packages(explicit: str | None = None) -> Path:
@@ -220,6 +233,16 @@ def find_site_packages(explicit: str | None = None) -> Path:
     """
     if explicit:
         return Path(explicit)
+
+    # 打包态（PyInstaller）：onefile 会把全部依赖**平铺解到** sys._MEIPASS，
+    # 该目录在语义上等价于 site-packages；directory 形式则在 _internal/。
+    # 必须优先判断 —— 否则会顺着 sys.path 找到"宿主机的" site-packages，
+    # 从而体检出一堆与本次交付无关的结论。
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidate = Path(meipass)
+        if candidate.is_dir():
+            return candidate
 
     for finder in sys.path:
         candidate = Path(finder)
@@ -599,6 +622,17 @@ def run_check(site_packages: str | None = None, *, skip_imports: bool = False) -
 
     Returns:
         :class:`CheckReport`。
+
+    Note:
+        **打包态（``sys.frozen``）下第 3 节「空壳包检测」不适用，会被跳过**：
+        PyInstaller 把纯 Python 模块编译进 PYZ 归档，``_MEIPASS`` 里只落地
+        二进制扩展与数据文件 —— 于是 ``PySide6/``（只有 ``.pyd``/``.dll``）、
+        ``numpy/``（只有 ``.libs``）、``rules/``、``ui/`` 这些**正常的**目录
+        全都命中「有文件但无 ``__init__.py``/``dist-info``」的残缺包判据，
+        产生 13 条纯误报并把 exe 的 ``--check-env`` 打成 exit 1。
+
+        打包态下真正有意义的是第 1、2 节（版本核对 + 逐包 import 验证），
+        它们能检出「exe 解包损坏 / DLL 缺失 / 子模块没打进来」这类真问题。
     """
     report = CheckReport()
     sp = find_site_packages(site_packages)
@@ -608,7 +642,14 @@ def run_check(site_packages: str | None = None, *, skip_imports: bool = False) -
         check_versions(report)
         check_imports(report)
 
-    report.issues = detect_shell_packages(sp)
+    if is_frozen() and site_packages is None:
+        report.scan_skipped_reason = (
+            "当前运行在 PyInstaller 打包态：纯 Python 模块位于 PYZ 归档内，"
+            "_MEIPASS 只落地二进制与数据文件，因此「无 __init__.py」属正常，"
+            "该判据不适用（第 1、2 节仍有效）"
+        )
+    else:
+        report.issues = detect_shell_packages(sp)
     return report
 
 
