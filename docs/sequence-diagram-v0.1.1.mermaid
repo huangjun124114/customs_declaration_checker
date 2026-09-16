@@ -1,0 +1,43 @@
+%% 线 1（v0.1.1）：品牌取值 → non_brand 过滤 → 判定（品牌侧）
+%% 依据：docs/09_增量设计_v0.1.x.md §4
+sequenceDiagram
+    autonumber
+    participant GE as JudgeEngine
+    participant EX as extract_detected_brand
+    participant CB as _collect_brand_candidates
+    participant NB as _load_non_brand_tokens
+    participant FT as _is_field_name_fragment
+    participant VT as _vote_brand
+    participant NG as NoiseGuard
+    participant DE as _decide
+
+    GE->>EX: extract_detected_brand(texts, repo)
+    Note over EX: texts = 该记录逐图 OcrText 列表（同序）
+    EX->>CB: _collect_brand_candidates(texts)
+    CB-->>EX: {①label:[...], ②pn:[...], ③brand_model:[...], ④bare:[...]}
+    EX->>NB: _load_non_brand_tokens(repo)
+    NB-->>EX: (tokens, apply_layers)   %% v0.1.1 新增第 2 返回值
+    loop tier in [①label, ②pn, ③brand_model, ④bare]
+        alt tier ∈ apply_layers
+            EX->>EX: 丢弃 display.upper() ∈ tokens 的候选  %% ← 线 1 核心变更（③ 现被覆盖）
+        end
+        EX->>FT: _is_field_name_fragment(display, field_terms)
+        FT-->>EX: 丢弃字段名残片（SOP 3.5#1/#3）
+        EX->>VT: _vote_brand(dedup(tier), min_images=tier_min[tier])
+        Note over VT: min_images: ①②③=1, ④=2；&001 加权×2（裁决 §4.2）
+        VT-->>EX: winner or ""（无≥门候选→空）
+        alt winner 非空
+            EX-->>GE: detected_brand = winner（高优先级层抢占）
+        end
+    end
+    EX-->>GE: detected_brand（可能为 ""）
+    GE->>NG: classify_detail(declared, detected, whole_machine=...)
+    NG-->>GE: NoiseVerdict(level/both_absent/is_whole_machine)
+    GE->>DE: _decide(decl_brand, det_brand, bv, decl_model, det_model, mv)
+    DE-->>GE: (verdict, differences, noise_level, reason)
+    GE->>GE: _apply_degrade_guard(result)  %% SUSPICIOUS 绝不直达 ❌（不虚高）
+    GE-->>GE: CheckResult
+
+%% seq=5 变更点（实测）：
+%%   变更前：③=[V-MA, NMY] → NMY 抢占 → detected='NMY' → ❌
+%%   变更后：③ 过滤后空 → ④ baori(仅1图,≥2门拒) → detected='' → ⚠️

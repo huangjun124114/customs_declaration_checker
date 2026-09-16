@@ -1,0 +1,41 @@
+%% 线 1（v0.1.1）：非品牌护栏增量的类图
+%% 依据：docs/09_增量设计_v0.1.x.md §3.1
+classDiagram
+    class RuleRepository {
+        +Path builtin_dir
+        +Path user_dir
+        +load_all() RuleSet
+        +get() RuleSet
+        +reload() RuleSet
+    }
+    class RuleSet {
+        +NonBrandTokenRules non_brand_tokens
+        + ...其余 6 份快照不变
+    }
+    class NonBrandTokenRules {
+        +tuple~str~ tokens
+        +tuple~str~ apply_layers   %% v0.1.1 新增（默认 [pn, brand_model, bare]）
+        +str source_path
+    }
+    class JudgeEngine {
+        +judge(record, ocr_texts) CheckResult
+    }
+    class NoiseGuard {
+        +classify_detail(declared, detected, ...) NoiseVerdict
+        +is_whole_machine_brand(text, brand_value) bool
+    }
+    class ExtractFns {
+        <<module-level>>
+        +extract_detected_brand(texts, rules) str
+        -_load_non_brand_tokens(rules) tuple
+        -_collect_brand_candidates(texts) dict
+        -_vote_brand(cands, min_images) str
+    }
+
+    RuleRepository --> RuleSet : produces
+    RuleSet *-- NonBrandTokenRules
+    JudgeEngine --> RuleRepository : injects
+    JudgeEngine --> NoiseGuard : injects
+    JudgeEngine ..> ExtractFns : calls
+
+%% 层名 ↔ tier 常量：label=_TIER_LABEL / pn=_TIER_PN / brand_model=_TIER_BRAND_MODEL / bare=_TIER_BARE
