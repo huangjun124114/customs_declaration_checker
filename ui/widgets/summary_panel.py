@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.run_controller import ControllerState
 from core.constants import ALL_VERDICTS, REVIEW_VERDICTS, VERDICT_TEXT
 from core.models import Verdict
 from ui.styles.palette import VERDICT_COLORS, Palette
@@ -41,6 +42,19 @@ _TEXT_BY_VALUE: dict[str, str] = {v.value: VERDICT_TEXT[v] for v in Verdict}
 
 #: 「待人工复核」枚举短值集合
 _REVIEW_VALUES: frozenset[str] = frozenset(v.value for v in REVIEW_VERDICTS)
+
+#: 允许进入人工复核工作台的**终态**（v0.2.0 点 4）。
+#:
+#: * ``FINISHED`` —— 跑完；
+#: * ``ABORTED`` / ``FAILED`` —— **只要已产出结果**（Q4-附：中止后允许进工作台）。
+#: 其余状态（初始 / ``IDLE*`` / ``RUNNING`` / ``PAUSED``）一律**不允许**。
+_WORKBENCH_ALLOWED_STATES: frozenset[ControllerState] = frozenset(
+    {
+        ControllerState.FINISHED,
+        ControllerState.ABORTED,
+        ControllerState.FAILED,
+    }
+)
 
 
 class _CountCard(QFrame):
@@ -98,6 +112,10 @@ class SummaryPanel(QFrame):
         super().__init__(parent)
         self.setObjectName("zoneCard")
         self._cards: dict[str, _CountCard] = {}
+        #: 最近一次「待人工复核」条数（按钮可用性输入之一）
+        self._review_total: int = 0
+        #: 最近一次控制器状态（按钮可用性输入之一；``None`` = 尚未收到状态）
+        self._run_state: ControllerState | None = None
         self._build_ui()
 
     # ─────────────────────── 构建 ───────────────────────
@@ -163,17 +181,36 @@ class SummaryPanel(QFrame):
             if verdict_value in _REVIEW_VALUES:
                 review_total += value
 
+        self._review_total = review_total
         self.processed_label.setText(f"已处理：{int(processed)}/{int(total)} 条")
         self.review_label.setText(f"待人工复核：{review_total} 条")
-        self.btn_workbench.setEnabled(review_total > 0)
+        self._refresh_workbench_button()
+
+    def set_run_state(self, state: ControllerState) -> None:
+        """记录控制器状态并刷新工作台入口可用性（v0.2.0 点 4）。
+
+        修复既有缺陷：旧实现仅按 ``review_total > 0`` 判定 —— 运行中 counts 一旦增长，
+        按钮就会亮起、用户可点进工作台。现改为「**有待复核项 且 处于终态**」双重条件。
+
+        Args:
+            state: 控制器当前状态。
+        """
+        self._run_state = state
+        self._refresh_workbench_button()
+
+    def _refresh_workbench_button(self) -> None:
+        """按「有待复核项 且 允许状态」刷新工作台入口按钮可用性。"""
+        enabled = self._review_total > 0 and self._run_state in _WORKBENCH_ALLOWED_STATES
+        self.btn_workbench.setEnabled(enabled)
 
     def clear(self) -> None:
         """清零（新一轮跑批前调用）。"""
         for card in self._cards.values():
             card.set_value(0)
+        self._review_total = 0
         self.processed_label.setText("已处理：0/0 条")
         self.review_label.setText("待人工复核：0 条")
-        self.btn_workbench.setEnabled(False)
+        self._refresh_workbench_button()
         self.artifacts_label.setText("三产物：尚未产出")
 
     def show_artifacts(self, output_paths: dict[str, str]) -> None:

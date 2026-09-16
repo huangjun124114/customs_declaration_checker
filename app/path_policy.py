@@ -4,11 +4,13 @@
 
   1. **原始输入只读** —— :meth:`PathPolicy.validate_inputs` 只读探测输入存在性与
      可读性；从不写入用户选定输入。
-  2. **产物分流** —— :meth:`PathPolicy.resolve_outputs` 返回 ``(成果产出, 过程产出)``
+  2. **产物分流** —— :meth:`PathPolicy.resolve_outputs` 返回 ``(result, logs)``
      两个目录；写入前用 :func:`infra.fs_lock.assert_within` 断言归属，
      越界抛 :class:`infra.errors.OutputPathViolation`。
-  3. **用户指定优先** —— 未指定输出目录时，默认落在「Excel 同目录的兄弟目录」或
-     「exe/脚本同目录」，**绝不静默扫描默认共享目录**（SOP 2.2）。
+  3. **运行目录约定（v0.2.0）** —— 未显式指定输出目录时，默认落在
+     ``app_base_dir()/报关申报要素校验/{result,logs}``（打包态 = exe 同目录，
+     开发态 = 工程根），并在解析时 **幂等创建**（``mkdir(exist_ok=True)``，
+     已存在则复用，绝不清理已有内容）；**绝不静默扫描默认共享目录**（SOP 2.2）。
 
 另含：
 
@@ -22,6 +24,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -29,19 +32,62 @@ from infra.encoding import normalize_path, normalize_path_str
 from infra.errors import PathNotAccessibleError
 from infra.fs_lock import assert_within
 from infra.logger import Phase, get_logger
+from infra.resources import app_base_dir
 
 __all__ = [
+    "WORKSPACE_DIR_NAME",
     "RESULT_DIR_NAME",
     "PROCESS_DIR_NAME",
+    "TICKET_SEGMENT_PATTERN",
+    "infer_ticket_no_from_path",
     "PreflightReport",
     "PathPolicy",
 ]
 
 
-#: 成果产出目录默认名（交付物：汇总表 + 复核清单）
-RESULT_DIR_NAME: str = "成果产出"
-#: 过程产出目录默认名（过程文件：JSON / 断点 / 日志）
-PROCESS_DIR_NAME: str = "过程产出"
+#: 运行目录根名（v0.2.0 点 1）。
+#:
+#: ⚠️ 是「报关申报要素**校**验」而非「检验」—— 与项目全称 / ``APP_TITLE`` 对齐
+#: （现场反馈原文「检验」经确认为笔误，Q1 已决）。
+WORKSPACE_DIR_NAME: str = "报关申报要素校验"
+#: 成果产出子目录默认名（交付物：汇总表 + 复核清单）。
+RESULT_DIR_NAME: str = "result"
+#: 过程产出子目录默认名（过程文件：JSON / 断点 / 缓存 / 运行日志）。
+PROCESS_DIR_NAME: str = "logs"
+
+#: 「形如票号的目录末段」判定正则：0–4 个字母 + 6–14 位数字（如 ``SA26090215``）。
+#:
+#: ⚠️ 刻意**要求以纯数字结尾**，以排除订单号（``2660310M``）与料号
+#: （``N011901-009350-001``）这类"看起来也像票据号"的目录名。
+TICKET_SEGMENT_PATTERN: str = r"^[A-Za-z]{0,4}\d{6,14}$"
+
+
+def infer_ticket_no_from_path(path: str | os.PathLike[str] | None) -> str | None:
+    """从「图片根目录末段」推断票号（Q2 兜底 · 第一步，纯逻辑、无 Qt）。
+
+    现场图片目录约定为 ``…\\{年份}年报关要素图片\\{人员}\\{票号}\\``，故**末段通常即票号**。
+    本函数仅做**保守推断**：命中 :data:`TICKET_SEGMENT_PATTERN` 才返回，否则返回 ``None``，
+    由 UI 层决定是否弹出输入框让用户手填（**绝不直接报错阻止开始**）。
+
+    Args:
+        path: 图片根目录路径（可 UNC、可带引号、可带尾随分隔符）。
+
+    Returns:
+        末段形如票号时返回该段（去空白）；否则 ``None``。
+    """
+    if path is None:
+        return None
+    text = str(path).strip().strip('"').strip()
+    if not text:
+        return None
+    # 归一化 ``file:///`` 前缀 + 去尾随分隔符后取末段（兼容 UNC 与 Windows/Linux 分隔符）
+    cleaned = normalize_path_str(text).rstrip("/\\")
+    if not cleaned:
+        return None
+    segment = re.split(r"[\\/]", cleaned)[-1].strip()
+    if segment and re.fullmatch(TICKET_SEGMENT_PATTERN, segment):
+        return segment
+    return None
 
 
 @dataclass
@@ -109,9 +155,9 @@ class PathPolicy:
     """路径与产物分流策略（架构设计第 4 节 ``PathPolicy``）。
 
     Args:
-        app_home: 应用主目录（默认输出目录的锚点，缺省为当前工作目录）。
+        app_home: 应用主目录（**显式给出时**作为输出目录锚点；缺省改用
+            :func:`infra.resources.app_base_dir`）。
         protected_roots: 受保护输入根列表（防误写输入，供 :meth:`assert_readonly`）。
-        log_phase: 日志阶段标签。
     """
 
     def __init__(
@@ -123,10 +169,13 @@ class PathPolicy:
         """构造路径策略。
 
         Args:
-            app_home: 应用主目录（默认输出目录锚点）。
+            app_home: 应用主目录（**仅当其显式传入时**才用作输出目录锚点）。
             protected_roots: 受保护输入根列表。
         """
+        #: 仅当调用方**显式**传入 ``app_home`` 时才用它当锚点；否则锚点用
+        #: :func:`infra.resources.app_base_dir`（打包态 = exe 目录，开发态 = 工程根）。
         self.app_home: Path = normalize_path(app_home) if app_home else Path.cwd()
+        self._app_home_explicit: bool = app_home is not None
         self._protected: list[str] = [
             str(p) for p in (protected_roots or []) if str(p).strip()
         ]
@@ -346,23 +395,29 @@ class PathPolicy:
         process_dir: str | os.PathLike[str] | None = None,
         base: str | os.PathLike[str] | None = None,
     ) -> tuple[Path, Path]:
-        """解析 ``(成果产出, 过程产出)`` 两个输出目录（强制分流）。
+        """解析 ``(成果产出 result, 过程产出 logs)`` 两个输出目录（强制分流）。
 
-        规则（架构设计 Q3）：
+        **v0.2.0 运行目录约定（点 1）**：
 
-          * 两个目录都给了 → 分别使用；
-          * 只给了一个 → 在其下自动建 ``成果产出`` / ``过程产出`` 子目录；
-          * 都没给 → 用 ``base``（缺省 :attr:`app_home`）下的两个标准子目录。
+          * **都不给**（无显式覆盖）→ 返回
+            ``anchor/报关申报要素校验/{result, logs}``，其中 ``anchor`` = 显式
+            ``base`` > 显式 ``app_home`` > :func:`infra.resources.app_base_dir`；
+          * 只给 ``result_dir`` → 在其下建 ``logs`` 子目录；
+          * 只给 ``process_dir`` → 在其下建 ``result`` 子目录；
+          * 两个都给 → 分别使用（保留测试 / CLI 的显式覆盖能力）。
+
+        解析出的两个目录都会**幂等创建**（``mkdir(parents=True, exist_ok=True)``）：
+        已存在则直接复用，**绝不清理已有内容**。
 
         Args:
-            result_dir: 用户指定的成果产出目录。
-            process_dir: 用户指定的过程产出目录。
-            base: 兜底基目录（缺省 :attr:`app_home`）。
+            result_dir: 显式指定的成果产出目录（缺省 ``None``）。
+            process_dir: 显式指定的过程产出目录（缺省 ``None``）。
+            base: 显式指定的锚点基目录（缺省 ``None``；用于覆盖 ``app_base_dir()``）。
 
         Returns:
-            ``(result_dir, process_dir)`` 两个 :class:`pathlib.Path`。
+            ``(result_dir, process_dir)`` 两个 :class:`pathlib.Path`（均已创建）。
         """
-        anchor = normalize_path(base) if base is not None else self.app_home
+        workspace = self._resolve_anchor(base) / WORKSPACE_DIR_NAME
 
         result_text = str(result_dir or "").strip()
         process_text = str(process_dir or "").strip()
@@ -372,16 +427,33 @@ class PathPolicy:
         elif process_text:
             resolved_result = self.clean_dialog_path(process_text) / RESULT_DIR_NAME
         else:
-            resolved_result = anchor / RESULT_DIR_NAME
+            resolved_result = workspace / RESULT_DIR_NAME
 
         if process_text:
             resolved_process = self.clean_dialog_path(process_text)
         elif result_text:
             resolved_process = self.clean_dialog_path(result_text) / PROCESS_DIR_NAME
         else:
-            resolved_process = anchor / PROCESS_DIR_NAME
+            resolved_process = workspace / PROCESS_DIR_NAME
 
+        self._ensure_dir(resolved_result)
+        self._ensure_dir(resolved_process)
         return resolved_result, resolved_process
+
+    def _resolve_anchor(self, base: str | os.PathLike[str] | None) -> Path:
+        """确定输出目录锚点：显式 ``base`` > 显式 ``app_home`` > ``app_base_dir()``。"""
+        if base is not None:
+            return normalize_path(base)
+        if self._app_home_explicit:
+            return self.app_home
+        return app_base_dir()
+
+    def _ensure_dir(self, target: Path) -> None:
+        """幂等创建目录（已存在则复用；失败仅告警，不阻断）。"""
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:  # noqa: PERF203 - 单次调用，无需优化
+            self._log.warning(f"运行目录创建失败（已忽略）：{target} - {exc}")
 
     def assert_target_in_result(
         self,

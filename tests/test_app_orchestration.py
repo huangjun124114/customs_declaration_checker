@@ -186,11 +186,11 @@ def test_review_store_missing_key_raises(temp_project: dict[str, Path]) -> None:
 
 
 def test_path_policy_resolve_outputs(temp_project: dict[str, Path]) -> None:
-    """resolve_outputs 返回 (成果产出, 过程产出) 两目录。"""
+    """resolve_outputs 默认返回「报关申报要素校验/{result,logs}」两目录（v0.2.0 点 1）。"""
     policy = PathPolicy(app_home=temp_project["root"])
     result_dir, process_dir = policy.resolve_outputs()
-    assert "成果产出" in str(result_dir)
-    assert "过程产出" in str(process_dir)
+    assert result_dir == temp_project["root"] / "报关申报要素校验" / "result"
+    assert process_dir == temp_project["root"] / "报关申报要素校验" / "logs"
 
 
 def test_path_policy_assert_within(temp_project: dict[str, Path]) -> None:

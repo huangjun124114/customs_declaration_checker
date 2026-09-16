@@ -87,9 +87,11 @@ class AppConfig:
         share_root: 图片根目录。按方案 3（N5）推荐**直接选到票号目录**；
             也允许选到 ``{年份}年报关要素图片`` 层，由 PathPolicy 自动下探。
         share_year: 年份（用于 ``SHARE_BASE_TEMPLATE`` 的高级折叠区预置）。
-        ticket_no: 票号（出货通知书号）。自动识别失败时由 UI 强制手填（Q9）。
-        result_dir: 成果产出目录（交付物：汇总表 + 复核清单）。
-        process_dir: 过程产出目录（过程文件：JSON 日志 / 断点 / 缓存）。
+        ticket_no: 票号（出货通知书号）。自动识别失败时 UI 先按图片根末段推断、
+            推断不出再弹框手填（Q2；v0.2.0，不再强制预填）。
+        result_dir: **兼容占位**（v0.2.0 起不读取、不写入生效值；输出目录由
+            ``app.path_policy.PathPolicy.resolve_outputs`` 的运行目录约定决定）。
+        process_dir: **兼容占位**（同上）。
         batch_size: 常规批大小（条/批）。
         batch_size_heavy: 图片多时的降批大小。
         heavy_image_threshold: 单条记录图片数超过该值时降批。
@@ -108,7 +110,13 @@ class AppConfig:
     share_year: int = 0
     ticket_no: str = ""
 
-    # ── 输出落点（强制分流）──
+    # ── 输出落点（**v0.2.0 起降级为兼容占位**）──
+    #
+    # ⚠️ Q8 决策：输出目录**不再由配置决定**，改由运行目录约定
+    # （``app_base_dir()/报关申报要素校验/{result,logs}``，见
+    # ``app.path_policy.PathPolicy.resolve_outputs``）自动就位。
+    # 这两个字段**保留仅为兼容旧版 config.json 反序列化**（防 ``from_dict`` 崩溃），
+    # 且**不被读取、不被写入生效值**——UI 不再写回它们（见 DataSourcePanel.apply_to_config）。
     result_dir: str = ""
     process_dir: str = ""
 

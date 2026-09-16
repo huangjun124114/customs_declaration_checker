@@ -2,8 +2,10 @@
 #  报关申报要素自动校验工具 · 一键打包脚本（Windows PowerShell）
 #
 #  用法：
-#     .\build_exe.ps1                 # 打包为单文件 exe（默认）
-#     .\build_exe.ps1 -Onedir         # 打包为目录形式（体积/启动速度折中）
+#     .\build_exe.ps1                 # 打包为目录形式（onedir，v0.2.0 默认）
+#     .\build_exe.ps1 -Zip            # 目录形式 + 产出 dist 下的分发包 zip
+#     .\build_exe.ps1 -Onefile        # 回退单文件 exe（非默认）
+#     .\build_exe.ps1 -Onedir         # 显式目录形式（= 默认；保留以兼容旧脚本调用）
 #     .\build_exe.ps1 -SkipEnvCheck   # 跳过环境体检（⚠️ 不推荐，仅供排错）
 #     .\build_exe.ps1 -Clean          # 打包前清理 build/dist 缓存
 #
@@ -18,12 +20,19 @@
 [CmdletBinding()]
 param(
     [switch]$Onedir,
+    [switch]$Onefile,
+    [switch]$Zip,
     [switch]$SkipEnvCheck,
     [switch]$Clean,
     [string]$Python = ""
 )
 
 $ErrorActionPreference = "Stop"
+
+# 交付版本（与 main.APP_VERSION / pyproject.version 对齐）
+$Version = "0.2.0"
+# 分发包名（v0.2.0 点 10）
+$ZipName = "报关申报要素校验工具_v${Version}_0916.zip"
 
 # ── 强制 UTF-8（SOP 陷阱 #5：官方打包器用 GBK 读文件）────────────────────
 $env:PYTHONUTF8 = "1"
@@ -108,14 +117,18 @@ $pyiArgs = @(
     "customs_checker.spec"
 )
 
-# --onedir 备选（spec 内已定义 onedir 逻辑由 EXE 的 COLLECT 决定；
-#  此处通过环境变量传递，供 build 侧选择输出形态）
-if ($Onedir) {
-    $env:CUSTOMS_ONEDIR = "1"
-    Write-Host "       模式：--onedir（目录形式）" -ForegroundColor Cyan
-} else {
+# --onedir 为 **默认**（spec 内由 CUSTOMS_ONEDIR 决定输出形态）；
+#   -Onefile 显式回退单文件；未指定时为目录形式（v0.2.0 点 10）。
+if ($Onefile) {
     $env:CUSTOMS_ONEDIR = "0"
-    Write-Host "       模式：单文件 exe" -ForegroundColor Cyan
+    Write-Host "       模式：单文件 exe（-Onefile）" -ForegroundColor Cyan
+} else {
+    $env:CUSTOMS_ONEDIR = "1"
+    if ($Onedir) {
+        Write-Host "       模式：--onedir（目录形式，显式 -Onedir）" -ForegroundColor Cyan
+    } else {
+        Write-Host "       模式：--onedir（目录形式，默认）" -ForegroundColor Cyan
+    }
 }
 
 & $Python -m PyInstaller @pyiArgs
@@ -132,11 +145,47 @@ Write-Host "[STEP 5] 核对产物..." -ForegroundColor Yellow
 $distDir = Join-Path $Root "dist"
 if (Test-Path $distDir) {
     Get-ChildItem -Path $distDir | ForEach-Object {
-        $sizeMB = [math]::Round($_.Length / 1MB, 1)
-        Write-Host ("       {0}  ({1} MB)" -f $_.Name, $sizeMB) -ForegroundColor Green
+        if ($_.PSIsContainer) {
+            Write-Host ("       {0}\  (目录)" -f $_.Name) -ForegroundColor Green
+        } else {
+            $sizeMB = [math]::Round($_.Length / 1MB, 1)
+            Write-Host ("       {0}  ({1} MB)" -f $_.Name, $sizeMB) -ForegroundColor Green
+        }
     }
     Write-Host ""
     Write-Host "[OK]   打包完成。产物目录：$distDir" -ForegroundColor Green
+
+    # ── 6. 可选：压缩为分发包 zip（v0.2.0 点 10，由 -Zip 开关触发）──────
+    if ($Zip) {
+        Write-Host ""
+        Write-Host "[STEP 6] 压缩分发包..." -ForegroundColor Yellow
+        $appDirName = "报关申报要素校验工具"
+        $appDir = Join-Path $distDir $appDirName
+        $zipPath = Join-Path $distDir $ZipName
+
+        if ($Onefile) {
+            Write-Host "[WARN] -Onefile 模式无目录可压缩，已跳过 -Zip。" -ForegroundColor Yellow
+        }
+        elseif (-not (Test-Path $appDir)) {
+            Write-Host "[FAIL] 未找到目录形式产物：$appDir（无法压缩）。" -ForegroundColor Red
+            exit 1
+        }
+        else {
+            if (Test-Path $zipPath) {
+                Remove-Item -Force $zipPath -ErrorAction SilentlyContinue
+            }
+            Compress-Archive -Path $appDir -DestinationPath $zipPath -CompressionLevel Optimal -Force
+            if (Test-Path $zipPath) {
+                $zipMB = [math]::Round((Get-Item $zipPath).Length / 1MB, 1)
+                Write-Host ("[OK]   分发包：{0}  ({1} MB)" -f $zipPath, $zipMB) -ForegroundColor Green
+                Write-Host "       交付物 = 该 zip（解压后双击「报关申报要素校验工具.exe」运行）。" -ForegroundColor Green
+            } else {
+                Write-Host "[FAIL] zip 生成失败。" -ForegroundColor Red
+                exit 1
+            }
+        }
+    }
+
     Write-Host "       请在**干净 Win10 1809+ / Win11 x64** 机器上双击验证。" -ForegroundColor Green
 } else {
     Write-Host "[FAIL] 未找到 dist 目录，打包可能未成功。" -ForegroundColor Red

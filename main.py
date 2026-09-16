@@ -35,37 +35,42 @@ __all__ = ["main", "build_application", "create_main_window"]
 
 APP_NAME = "报关申报要素自动校验工具"
 #: 交付版本号（对外）。与《架构设计》文档的版本号（v1.2）**属不同体系**，勿混用。
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.2.0"
 ORG_NAME = "CustomsChecker"
 
 
 def _default_log_path(config: AppConfig) -> Path | None:
-    """推导本次会话的日志落点（过程产出目录）。
+    """推导本次会话的日志落点（过程产出 ``logs`` 目录，v0.2.0 运行目录约定）。
 
     Args:
-        config: 应用配置。
+        config: 应用配置（**仅用其票号做文件名**；不再读取 ``result_dir`` /
+            ``process_dir`` —— Q8 已把这些字段降级为兼容占位）。
 
     Returns:
-        日志文件路径；无法确定过程产出目录时返回 ``None``（仅控制台/信号日志）。
+        日志文件路径；目录无法确定时返回 ``None``（仅控制台/信号日志）。
 
     Note:
-        兜底分支使用 :func:`infra.resources.app_base_dir` 而**不是** ``__file__`` ——
-        单文件（onefile）打包态下 ``__file__`` 位于 ``%TEMP%\\_MEIxxxxxx``
-        临时解包目录，**进程退出即被删除**，日志会随之消失
-        （违反「可追溯」红线）。``app_base_dir()`` 在打包态返回 exe 所在目录。
+        落点恒为 ``app_base_dir()/报关申报要素校验/logs``（打包态 = exe 同目录，
+        开发态 = 工程根），由 :meth:`app.path_policy.PathPolicy.resolve_outputs`
+        解析并**幂等创建**。**绝不**用 ``__file__`` 兜底 —— 单文件（onefile）打包态下
+        ``__file__`` 位于 ``%TEMP%\\_MEIxxxxxx`` 临时解包目录，进程退出即被删除，
+        日志会随之消失（违反「可追溯」红线）。
     """
-    from infra.resources import app_base_dir
+    from app.path_policy import PROCESS_DIR_NAME, WORKSPACE_DIR_NAME, PathPolicy
 
-    if config.process_dir.strip():
-        proc = Path(config.process_dir)
-    elif config.result_dir.strip():
-        proc = Path(config.result_dir).parent / "过程产出"
-    else:
-        # 兜底：exe/脚本同目录下建「过程产出」（E3 默认输出目录）
-        proc = app_base_dir() / "过程产出"
+    try:
+        _result_dir, process_dir = PathPolicy().resolve_outputs()
+    except Exception:  # noqa: BLE001 - 日志落点推导不得阻断启动
+        from infra.resources import app_base_dir
+
+        process_dir = app_base_dir() / WORKSPACE_DIR_NAME / PROCESS_DIR_NAME
+        try:
+            process_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
 
     ticket = config.ticket_no.strip() or "未命名"
-    return proc / f"校验运行日志_{ticket}.log"
+    return Path(process_dir) / f"校验运行日志_{ticket}.log"
 
 
 def _load_rules(log) -> None:

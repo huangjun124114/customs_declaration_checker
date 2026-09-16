@@ -1,17 +1,26 @@
 """Zone 1：数据源面板（ui.widgets.data_source_panel）。
 
-**三区布局的第一区**（架构设计 12.B.1）：用户在这里选定
+**三区布局的第一区**（架构设计 12.B.1 + v0.2.0 点 2/3）。用户在这里选定：
 
-  * **申报要素 Excel**（可 UNC / 长路径）；
-  * **图片根目录**（推荐直接选到票号目录；也支持「年份 + 票号」折叠区）；
-  * **票号**（自动识别失败时强制手填，Q9）；
-  * **输出目录**（成果产出 / 过程产出，缺省建议值）。
+  * **申报要素 Excel**（可 UNC / 长路径）—— 必填；
+  * **图片根目录**（推荐直接选到票号目录）—— 必填；
+  * **票号**（**只读展示**自动 / 推断结果；失败时由 ``main_window`` 兜底弹框手填，Q2）。
+
+⚠️ **v0.2.0 点 2 —— 控件精简**：``QGridLayout`` 由 5 行减为 **2 行（+1 行票号只读展示）**：
+「成果产出目录」「过程产出目录」两行**整行移除**，改由运行目录约定自动就位
+（``app_base_dir()/报关申报要素校验/{result,logs}``，见 :class:`app.path_policy.PathPolicy`）。
+``inputs()`` 仍返回**原有 5 键字典**，但 ``result_dir`` / ``process_dir`` 改为**派生值**
+（不再从控件读取），以兼容既有调用方。
 
 底部一行是**操作按钮区**：开始 / 重新开始 / 暂停 / 继续执行 / 中止 —— 按钮文案与可用性
-由 :class:`DataSourcePanel` 的 :meth:`set_state` 依据控制器状态机驱动（架构设计 12.A.4）：
+由 :meth:`DataSourcePanel.set_state` 依据控制器状态机驱动（架构设计 12.A.4）：
 
   * 无断点：开始按钮 =「▶ 开始」
   * 有未完成断点：开始按钮 =「↻ 重新开始」，暂停按钮 =「▶ 继续执行」
+
+⚠️ **v0.2.0 点 3 —— 运行期锁定数据源**：``RUNNING`` / ``PAUSED`` 期间，Excel 输入框 +
+浏览按钮、图片根输入框 + 浏览按钮、预检按钮**全部置灰**。``PAUSED`` 也锁定是**刻意的**：
+断点已绑定当前数据源指纹（``Fingerprint.is_same_source``），暂停期间换源会导致串票。
 
 同时承载**断点红字提示** ``QLabel#breakpointHint``（**禁令 2**，12.A）：仅在「未完成断点」
 时显字，颜色 ``BREAKPOINT_RED = "#D32F2F"``，文案严格按模板；非匹配断点绝不显红字。
@@ -34,6 +43,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.path_policy import PathPolicy
 from app.run_controller import ControllerState
 from infra.config import AppConfig
 from ui.styles.palette import BREAKPOINT_RED, Palette
@@ -65,6 +75,7 @@ class DataSourcePanel(QFrame):
     Args:
         config: 应用配置（用于预填输入框与回写）。
         parent: Qt 父控件。
+        path_policy: 路径策略（缺省新建；可注入以控制派生输出目录，主要供测试）。
     """
 
     start_clicked = Signal()
@@ -76,19 +87,31 @@ class DataSourcePanel(QFrame):
     probe_clicked = Signal()
     inputs_changed = Signal()
 
-    def __init__(self, config: AppConfig | None = None, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        config: AppConfig | None = None,
+        parent: QWidget | None = None,
+        *,
+        path_policy: PathPolicy | None = None,
+    ) -> None:
         """构造数据源面板。"""
         super().__init__(parent)
         self.setObjectName("zoneCard")
         self._config = config if config is not None else AppConfig()
+        self._path_policy = path_policy if path_policy is not None else PathPolicy()
 
         # 当前按钮语义（由状态机驱动）
         self._has_breakpoint = False
         self._running = False
         self._paused = False
 
+        # 派生的输出目录（v0.2.0 运行目录约定；控件精简后不再由用户选择）
+        self._result_dir: str = ""
+        self._process_dir: str = ""
+
         self._build_ui()
         self._wire()
+        self._resolve_output_dirs()
         self._load_from_config()
         # 初始态：无断点、未运行
         self.set_state(ControllerState.IDLE_NO_BREAKPOINT)
@@ -96,7 +119,7 @@ class DataSourcePanel(QFrame):
     # ─────────────────────── 构建 ───────────────────────
 
     def _build_ui(self) -> None:
-        """搭建面板布局。"""
+        """搭建面板布局（v0.2.0：5 行 → 2 个可编辑行 + 1 个票号只读行）。"""
         outer = QVBoxLayout(self)
         outer.setContentsMargins(14, 12, 14, 12)
         outer.setSpacing(8)
@@ -110,53 +133,41 @@ class DataSourcePanel(QFrame):
         grid.setVerticalSpacing(8)
         grid.setColumnStretch(1, 1)
 
-        # 申报要素 Excel
+        # ── 第 0 行：申报要素 Excel（保留，可编辑）──
         self.excel_edit = QLineEdit(self)
         self.excel_edit.setPlaceholderText("选择申报要素 Excel（支持 UNC / 长路径）")
         self.excel_edit.setToolTip("申报要素 .xlsx 文件路径")
-        excel_btn = QPushButton("浏览…", self)
-        excel_btn.clicked.connect(self._on_browse_excel)
+        self.excel_btn = QPushButton("浏览…", self)
+        self.excel_btn.clicked.connect(self._on_browse_excel)
         grid.addWidget(self._label("申报要素 Excel"), 0, 0)
         grid.addWidget(self.excel_edit, 0, 1)
-        grid.addWidget(excel_btn, 0, 2)
+        grid.addWidget(self.excel_btn, 0, 2)
 
-        # 图片根目录
+        # ── 第 1 行：图片根目录（保留，可编辑）──
         self.share_edit = QLineEdit(self)
         self.share_edit.setPlaceholderText("选择图片根目录（推荐直接选到票号目录）")
         self.share_edit.setToolTip("产品实拍图片所在目录（票号层）")
-        share_btn = QPushButton("浏览…", self)
-        share_btn.clicked.connect(self._on_browse_share)
+        self.share_btn = QPushButton("浏览…", self)
+        self.share_btn.clicked.connect(self._on_browse_share)
         grid.addWidget(self._label("图片根目录"), 1, 0)
         grid.addWidget(self.share_edit, 1, 1)
-        grid.addWidget(share_btn, 1, 2)
+        grid.addWidget(self.share_btn, 1, 2)
 
-        # 票号
+        # ── 第 2 行：票号（只读展示；失败时由 main_window 兜底弹框手填，Q2）──
         self.ticket_edit = QLineEdit(self)
-        self.ticket_edit.setPlaceholderText("票号（自动识别失败时请手填，如 SA26090215）")
-        self.ticket_edit.setToolTip("出货通知书号；自动识别失败时必须手工填写（Q9）")
-        probe_btn = QPushButton("预检 / 探测断点", self)
-        probe_btn.clicked.connect(self.probe_clicked.emit)
+        self.ticket_edit.setPlaceholderText("预检识别 / 目录推断的票号（识别失败会提示手填）")
+        self.ticket_edit.setToolTip("出货通知书号（只读；自动识别失败时由程序兜底获取）")
+        self.ticket_edit.setReadOnly(True)
+        self.ticket_edit.setFrame(False)
+        self.ticket_edit.setObjectName("readonlyField")
+        self.probe_btn = QPushButton("预检 / 探测断点", self)
+        self.probe_btn.clicked.connect(self.probe_clicked.emit)
         grid.addWidget(self._label("票号"), 2, 0)
         grid.addWidget(self.ticket_edit, 2, 1)
-        grid.addWidget(probe_btn, 2, 2)
+        grid.addWidget(self.probe_btn, 2, 2)
 
-        # 成果产出目录
-        self.result_edit = QLineEdit(self)
-        self.result_edit.setPlaceholderText("成果产出目录（汇总表 / 复核清单）")
-        result_btn = QPushButton("浏览…", self)
-        result_btn.clicked.connect(self._on_browse_result)
-        grid.addWidget(self._label("成果产出目录"), 3, 0)
-        grid.addWidget(self.result_edit, 3, 1)
-        grid.addWidget(result_btn, 3, 2)
-
-        # 过程产出目录
-        self.process_edit = QLineEdit(self)
-        self.process_edit.setPlaceholderText("过程产出目录（JSON 日志 / 断点 / 缓存）")
-        process_btn = QPushButton("浏览…", self)
-        process_btn.clicked.connect(self._on_browse_process)
-        grid.addWidget(self._label("过程产出目录"), 4, 0)
-        grid.addWidget(self.process_edit, 4, 1)
-        grid.addWidget(process_btn, 4, 2)
+        # 注：v0.2.0 起「成果产出目录」「过程产出目录」两行**整行移除** —— 输出目录
+        # 改由运行目录约定（app_base_dir()/报关申报要素校验/{result,logs}）自动就位。
 
         outer.addLayout(grid)
 
@@ -202,34 +213,56 @@ class DataSourcePanel(QFrame):
         return lbl
 
     def _wire(self) -> None:
-        """接线输入变化信号。"""
-        for edit in (
-            self.excel_edit,
-            self.share_edit,
-            self.ticket_edit,
-            self.result_edit,
-            self.process_edit,
-        ):
+        """接线输入变化信号（票号只读，不参与 inputs_changed）。"""
+        for edit in (self.excel_edit, self.share_edit):
             edit.textChanged.connect(self.inputs_changed.emit)
+
+    # ─────────────────────── 输出目录（派生）───────────────────────
+
+    def _resolve_output_dirs(self) -> None:
+        """按运行目录约定派生 ``result_dir`` / ``process_dir``（幂等创建，失败静默降级）。"""
+        try:
+            result_dir, process_dir = self._path_policy.resolve_outputs()
+        except Exception:  # noqa: BLE001 - 派生失败不得阻断 UI 构建
+            return
+        self._result_dir = str(result_dir)
+        self._process_dir = str(process_dir)
+
+    def set_output_dirs(
+        self,
+        result_dir: str,
+        process_dir: str,
+    ) -> None:
+        """覆盖派生输出目录（供测试 / 特殊部署注入；不影响正常约定路径）。
+
+        Args:
+            result_dir: 成果产出目录。
+            process_dir: 过程产出目录。
+        """
+        self._result_dir = str(result_dir)
+        self._process_dir = str(process_dir)
+
+    def output_dirs(self) -> tuple[str, str]:
+        """返回当前派生的 ``(result_dir, process_dir)``。"""
+        return self._result_dir, self._process_dir
 
     # ─────────────────────── 配置读写 ───────────────────────
 
     def _load_from_config(self) -> None:
-        """用配置预填输入框。"""
+        """用配置预填可编辑输入框（输出目录不再来自配置，见 Q8）。"""
         self.excel_edit.setText(getattr(self._config, "excel_path", "") or "")
         self.share_edit.setText(getattr(self._config, "share_root", "") or "")
         self.ticket_edit.setText(getattr(self._config, "ticket_no", "") or "")
-        self.result_edit.setText(getattr(self._config, "result_dir", "") or "")
-        self.process_edit.setText(getattr(self._config, "process_dir", "") or "")
 
     def apply_to_config(self) -> AppConfig:
-        """把输入框内容回写配置对象并返回（调用方负责 ``.save()``）。"""
+        """把输入框内容回写配置对象并返回（调用方负责 ``.save()``）。
+
+        ⚠️ v0.2.0：**不写回** ``result_dir`` / ``process_dir``（Q8：字段降级为兼容占位）。
+        """
         cfg = self._config
         cfg.excel_path = self.excel_edit.text().strip()
         cfg.share_root = self.share_edit.text().strip()
         cfg.ticket_no = self.ticket_edit.text().strip()
-        cfg.result_dir = self.result_edit.text().strip()
-        cfg.process_dir = self.process_edit.text().strip()
         return cfg
 
     # ─────────────────────── 浏览槽 ───────────────────────
@@ -257,18 +290,6 @@ class DataSourcePanel(QFrame):
         if picked:
             self.share_edit.setText(picked)
 
-    def _on_browse_result(self) -> None:
-        """浏览成果产出目录。"""
-        picked = self._pick_dir("选择成果产出目录", self.result_edit.text().strip())
-        if picked:
-            self.result_edit.setText(picked)
-
-    def _on_browse_process(self) -> None:
-        """浏览过程产出目录。"""
-        picked = self._pick_dir("选择过程产出目录", self.process_edit.text().strip())
-        if picked:
-            self.process_edit.setText(picked)
-
     # ─────────────────────── 按钮点击路由 ───────────────────────
 
     def _on_primary_clicked(self) -> None:
@@ -288,7 +309,10 @@ class DataSourcePanel(QFrame):
     # ─────────────────────── 状态机驱动 ───────────────────────
 
     def set_state(self, state: ControllerState) -> None:
-        """依据控制器状态刷新按钮文案与可用性（架构设计 12.A.4）。
+        """依据控制器状态刷新按钮文案与可用性（架构设计 12.A.4 + v0.2.0 点 3）。
+
+        除按钮语义外，还管控**输入可用性**：``RUNNING`` / ``PAUSED`` 期间锁定数据源
+        （Excel 输入框 + 浏览按钮 / 图片根输入框 + 浏览按钮 / 预检按钮 全部置灰）。
 
         Args:
             state: 控制器当前状态。
@@ -328,6 +352,18 @@ class DataSourcePanel(QFrame):
             self.btn_pause.setEnabled(state in (ControllerState.RUNNING,))
 
         self.btn_stop.setEnabled(state in (ControllerState.RUNNING, ControllerState.PAUSED))
+
+        # ── v0.2.0 点 3：运行期锁定数据源 ──
+        locked = state in (ControllerState.RUNNING, ControllerState.PAUSED)
+        for widget in (
+            self.excel_edit,
+            self.excel_btn,
+            self.share_edit,
+            self.share_btn,
+            self.probe_btn,
+        ):
+            widget.setEnabled(not locked)
+
         self._refresh_style()
 
     def _refresh_style(self) -> None:
@@ -364,16 +400,19 @@ class DataSourcePanel(QFrame):
     # ─────────────────────── 输入快照 ───────────────────────
 
     def inputs(self) -> dict[str, str]:
-        """返回输入框当前值快照。"""
+        """返回输入快照（**恒为 5 键**，调用方依赖）。
+
+        ``result_dir`` / ``process_dir`` 为**派生值**（运行目录约定），不再是控件内容。
+        """
         return {
             "excel_path": self.excel_edit.text().strip(),
             "share_root": self.share_edit.text().strip(),
             "ticket_no": self.ticket_edit.text().strip(),
-            "result_dir": self.result_edit.text().strip(),
-            "process_dir": self.process_edit.text().strip(),
+            "result_dir": self._result_dir,
+            "process_dir": self._process_dir,
         }
 
     def set_ticket_no(self, ticket: str) -> None:
-        """写回自动识别到的票号（不改动用户已手填的其它字段）。"""
+        """写回票号（自动识别 / 目录推断 / 兜底手填的结果）。"""
         if ticket:
             self.ticket_edit.setText(ticket)

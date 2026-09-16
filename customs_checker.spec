@@ -136,10 +136,16 @@ a = Analysis(  # noqa: F821 - PyInstaller 注入的全局名
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)  # noqa: F821
 
-# ── 两种输出形态（由 build_exe.ps1 的 -Onedir 开关经环境变量驱动）──────
-#   CUSTOMS_ONEDIR=1 → 目录形式（onefolder，启动快、体积外露，旧机器友好）
-#   其它/未设置      → 单文件 exe（onefile，全内置免安装，体积约 200–350MB）
-_ONEDIR = os.environ.get("CUSTOMS_ONEDIR", "0").strip() in {"1", "true", "True", "yes"}
+# ── 两种输出形态（由 CUSTOMS_ONEDIR 环境变量驱动，缺省 = onedir）──────
+#   CUSTOMS_ONEDIR 未设置 / "1" → **onedir**（目录形式，v0.2.0 默认交付形态）
+#   CUSTOMS_ONEDIR = "0"        → onefile（单文件 exe，显式回退）
+#   onedir 优势：启动免除 149MB 解包、杀软误报少、依赖文件现场可见。
+_ONEDIR = os.environ.get("CUSTOMS_ONEDIR", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
 
 _EXE_COMMON = dict(  # noqa: F821 - PyInstaller 注入的全局名
     name="报关申报要素校验工具",
@@ -172,7 +178,7 @@ if _ONEDIR:
         name="报关申报要素校验工具",
     )
 else:
-    # 单文件：全部内联进 exe（默认交付形态）
+    # 单文件：全部内联进 exe（显式回退形态 CUSTOMS_ONEDIR=0）
     exe = EXE(  # noqa: F821
         pyz,
         a.scripts,

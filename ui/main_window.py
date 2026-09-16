@@ -27,6 +27,7 @@ from typing import Any
 
 from PySide6.QtGui import QAction, QCloseEvent
 from PySide6.QtWidgets import (
+    QInputDialog,
     QMainWindow,
     QMessageBox,
     QStatusBar,
@@ -36,7 +37,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.events import BreakpointSummary, PipelineOutcome, TaskProgress
-from app.path_policy import PreflightReport
+from app.path_policy import PreflightReport, infer_ticket_no_from_path
 from app.review_store import ReviewStore
 from app.run_controller import ControllerState
 from app.session import AppSession
@@ -50,7 +51,10 @@ from ui.widgets.summary_panel import SummaryPanel
 __all__ = ["MainWindow"]
 
 APP_TITLE = "报关申报要素自动校验工具"
-APP_VERSION = "1.2.0"
+APP_VERSION = "0.2.0"
+
+#: 「人工复核工作台」页签索引（v0.2.0 点 4：初始隐藏，跑完 / 有结果后显示）
+_WORKBENCH_TAB_INDEX = 1
 
 
 class MainWindow(QMainWindow):
@@ -77,7 +81,9 @@ class MainWindow(QMainWindow):
         self._review_store: ReviewStore | None = None
         self._last_outcome: PipelineOutcome | None = None
         self._last_breakpoint: BreakpointSummary = BreakpointSummary()
+        self._last_state: ControllerState = ControllerState.IDLE
 
+        self._ensure_run_dirs()
         self._setup_window()
         self._setup_menu()
         self._setup_central()
@@ -85,6 +91,20 @@ class MainWindow(QMainWindow):
         self._wire_controller()
 
     # ─────────────────────── 初始化 ───────────────────────
+
+    def _ensure_run_dirs(self) -> None:
+        """启动即确保运行目录就位（v0.2.0 点 1）。
+
+        双击 exe（或开发态运行）后**立即**生成 ``报关申报要素校验\\{result,logs}``；
+        已存在则复用，**绝不清理已有内容**。失败仅记日志，不阻断启动。
+        """
+        try:
+            from app.path_policy import PathPolicy
+
+            result_dir, process_dir = PathPolicy().resolve_outputs()
+            self.log.info(f"运行目录就绪：成果={result_dir} 过程={process_dir}")
+        except Exception as exc:  # noqa: BLE001 - 目录初始化失败不得阻断启动
+            self.log.warn(f"运行目录初始化失败（已忽略）：{exc}")
 
     def _setup_window(self) -> None:
         """设置窗口基本属性（标题 / 尺寸 / 居中）。"""
@@ -139,6 +159,8 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget(central)
         self.tabs.addTab(self._build_three_zone(central), "校验主视图")
         self.tabs.addTab(self.workbench, "人工复核工作台")
+        # v0.2.0 点 4：初始隐藏工作台页签（跑完 / 有结果后才显示）
+        self.tabs.setTabVisible(_WORKBENCH_TAB_INDEX, False)
         layout.addWidget(self.tabs, 1)
 
         self.setCentralWidget(central)
@@ -243,7 +265,7 @@ class MainWindow(QMainWindow):
         self.data_source_panel.show_status(report.status_text(), error=not report.ok)
         self.progress_panel.append_log(report.status_text(), level=LogLevel.INFO.value)
 
-        # 探测断点（无 process_dir 时跳过）
+        # 探测断点（process_dir 为运行目录约定派生的 logs 目录，恒非空；仍保守判空）
         if report.ok and process_dir:
             self._controller.probe_breakpoint(
                 ticket_no=ticket or report.ticket_hint,
@@ -257,7 +279,12 @@ class MainWindow(QMainWindow):
     # ─────────────────────── 开始 / 重跑 / 续跑 ───────────────────────
 
     def _ready_to_run(self) -> dict[str, str] | None:
-        """校验输入齐全后返回输入快照，否则给出提示并返回 ``None``。"""
+        """校验输入齐全后返回输入快照，否则给出提示并返回 ``None``。
+
+        v0.2.0 点 2：必填项由 4 项减为 **2 项**（仅「申报要素 Excel」+「图片根目录」）；
+        票号与输出目录由程序兜底（输出目录 = 运行目录约定，票号 = 推断 / 弹框，见
+        :meth:`_resolve_ticket_no`）。
+        """
         if self._controller is None:
             self.data_source_panel.show_status("GUI 控制器不可用（无 Qt 环境）", error=True)
             return None
@@ -267,8 +294,6 @@ class MainWindow(QMainWindow):
             for name, key in (
                 ("申报要素 Excel", "excel_path"),
                 ("图片根目录", "share_root"),
-                ("成果产出目录", "result_dir"),
-                ("过程产出目录", "process_dir"),
             )
             if not inputs[key]
         ]
@@ -282,11 +307,59 @@ class MainWindow(QMainWindow):
             self.log.debug("配置落盘跳过：%s", exc)
         return inputs
 
+    def _resolve_ticket_no(self, inputs: dict[str, str]) -> str:
+        """确保票号可用（Q2 兜底）：已填 → 目录末段推断 → 弹框手填 → 允许留空。
+
+        **绝不**以「票号缺失」报错阻止开始（预检仍会再尝试识别）。
+
+        Args:
+            inputs: 输入快照（会被就地更新 ``ticket_no``）。
+
+        Returns:
+            最终采用的票号（可能为空串）。
+        """
+        ticket = (inputs.get("ticket_no") or "").strip()
+        if ticket:
+            return ticket
+
+        inferred = infer_ticket_no_from_path(inputs.get("share_root", ""))
+        if inferred:
+            self.data_source_panel.set_ticket_no(inferred)
+            self.progress_panel.append_log(
+                f"已从图片根目录末段推断票号：{inferred}", level=LogLevel.INFO.value
+            )
+            return inferred
+
+        typed = self._prompt_ticket_no(inputs.get("share_root", ""))
+        if typed:
+            self.data_source_panel.set_ticket_no(typed)
+            return typed
+        return ""
+
+    def _prompt_ticket_no(self, share_root: str) -> str:
+        """票号推断失败时的兜底输入框（Q2 (a)）。
+
+        Args:
+            share_root: 当前图片根目录（用于提示文案）。
+
+        Returns:
+            用户填写的票号；取消或留空返回空串（不阻止开始）。
+        """
+        text, ok = QInputDialog.getText(
+            self,
+            "请填写票号",
+            "未能自动识别票号，且无法从「图片根目录末段」推断。\n"
+            f"图片根：{share_root}\n\n"
+            "请手工填写票号（如 SA26090215）；留空亦可，预检会再尝试识别：",
+        )
+        return text.strip() if (ok and text) else ""
+
     def _launch(self, method_name: str) -> None:
         """统一启动入口（start / restart / resume_run）。"""
         inputs = self._ready_to_run()
         if inputs is None:
             return
+        inputs["ticket_no"] = self._resolve_ticket_no(inputs)
         self._reset_runtime_views()
         method = getattr(self._controller, method_name)
         method(
@@ -331,6 +404,7 @@ class MainWindow(QMainWindow):
         self.summary_panel.clear()
         self.session.clear()
         self.workbench.set_session(self.session)
+        self._update_workbench_tab()
 
     # ─────────────────────── 信号槽（后台 → UI）───────────────────────
 
@@ -343,9 +417,34 @@ class MainWindow(QMainWindow):
             )
 
     def _on_state(self, state: ControllerState) -> None:
-        """状态变化：驱动第一区按钮文案（禁令 2 状态机）。"""
+        """状态变化：驱动第一区按钮文案 + 第三区工作台入口 + 工作台页签可见性。"""
+        self._last_state = state
         self.data_source_panel.set_state(state)
+        self.summary_panel.set_run_state(state)
+        self._update_workbench_tab()
         self.statusBar().showMessage(f"状态：{state.value}", 8000)
+
+    def _update_workbench_tab(self) -> None:
+        """按控制器状态 + 是否有结果，控制「人工复核工作台」页签可见性（v0.2.0 点 4）。
+
+        规则：
+
+          * ``FINISHED`` → 显示；
+          * ``ABORTED`` / ``FAILED`` **且已产出结果** → 显示（Q4-附：允许中止后进工作台）；
+          * ``ABORTED`` / ``FAILED`` **无结果** / 初始 / ``RUNNING`` / ``PAUSED`` → 隐藏。
+
+        「是否有结果」以 :meth:`app.session.AppSession.results`（= 已产出的 CheckResult）
+        非空判定，与四卡计数同源。
+        """
+        state = self._last_state
+        has_results = bool(self.session.results())
+        if state == ControllerState.FINISHED:
+            visible = True
+        elif state in (ControllerState.ABORTED, ControllerState.FAILED):
+            visible = has_results
+        else:
+            visible = False
+        self.tabs.setTabVisible(_WORKBENCH_TAB_INDEX, visible)
 
     def _on_breakpoint(self, summary: BreakpointSummary) -> None:
         """断点探测结果：**仅未完成断点显红字**（禁令 2）。"""
@@ -367,6 +466,8 @@ class MainWindow(QMainWindow):
         )
         self.summary_panel.show_artifacts(dict(outcome.output_paths))
         self.workbench.set_session(self.session)
+        # v0.2.0 点 4：结果落定后刷新工作台页签可见性（与 _on_state 双保险）
+        self._update_workbench_tab()
 
         level = LogLevel.ERROR.value if outcome.failed else LogLevel.INFO.value
         self.progress_panel.append_log(outcome.message, level=level)

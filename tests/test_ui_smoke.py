@@ -37,6 +37,20 @@ def qapp():
     yield app
 
 
+@pytest.fixture(autouse=True)
+def _isolate_runtime_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """把「运行目录锚点」与「用户配置目录」隔离到 tmp（v0.2.0 点 1 引入的自动建目录）。
+
+    否则构造 ``MainWindow`` 会在工程根下生成 ``报关申报要素校验/{result,logs}``、
+    并把配置写进真实 ``%APPDATA%``。
+    """
+    import app.path_policy as path_policy
+
+    monkeypatch.setattr(path_policy, "app_base_dir", lambda: tmp_path)
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    return tmp_path
+
+
 @pytest.fixture
 def window(qapp):
     """构造并显示一个 MainWindow（offscreen，保证 isVisible 语义正确）。"""
@@ -185,13 +199,15 @@ def test_log_level_filter_live(window) -> None:
 # ══════════════════════════════════════════════════════════════════
 
 
-def test_workbench_rejudge_idempotent(window, temp_project: dict[str, Path]) -> None:
-    """经主窗口槽重判：连续两次不同判定以最后一次为准。"""
+def test_workbench_rejudge_idempotent(window) -> None:
+    """经主窗口槽重判：连续两次不同判定以最后一次为准。
+
+    v0.2.0 点 2：输出目录控件已移除，改为运行目录约定派生（由 ``_isolate_runtime_dirs``
+    隔离到 tmp），故本用例不再设置 ``process_edit`` / ``result_edit``。
+    """
     from core.models import CheckResult, DeclarationRecord, ImageEvidence, Verdict
 
     window.data_source_panel.ticket_edit.setText("SA26090215")
-    window.data_source_panel.process_edit.setText(str(temp_project["process"]))
-    window.data_source_panel.result_edit.setText(str(temp_project["result"]))
 
     window.session.clear()
     rec = DeclarationRecord(ticket_no="SA26090215", part_no="N1", order_no="O1")
