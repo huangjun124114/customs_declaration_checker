@@ -67,6 +67,29 @@
 | 6 | **`-Onedir` 开关生效** | `build_exe.ps1 -Onedir` 原只设了 `CUSTOMS_ONEDIR` 环境变量，而 `customs_checker.spec` **从未读取**它 —— 加与不加都出单文件。spec 内补 `EXE/COLLECT` 双分支实现 |
 | 7 | **版本号归位** | 交付版本号统一为 `0.1.0`（`main.py APP_VERSION` + `pyproject.toml`）；与《架构设计》文档版本 `v1.2` 明确区分 |
 
+### 修复 · exe 冒烟实测暴露的 4 个打包态缺陷
+
+单文件 exe 首次真正跑起来后，`--self-test` 与 `--check-env` 两条**现场排错主路径
+全部失效**。四个缺陷逐一修复，各自补回归锁：
+
+| # | 缺陷 | 现象 | 修法 |
+|---|---|---|---|
+| 1 | **`--self-test` 打印 ✅ 时崩** | `SELF-TEST: PASS` 与 `SELF-TEST: FAIL - UnicodeEncodeError: 'gbk' codec can't encode '\u2705'` **同时**出现，退出码 1 —— 断言全过却报失败，误导排错方向 | 原 `force_utf8_encoding()` 只设环境变量，而它对**已打开的** std 流无效（进程启动时已按简体中文 Windows 的 ANSI 代码页建好）。新增 `_reconfigure_std_streams()` 显式 `reconfigure(encoding="utf-8", errors="replace")`，并容忍 stdout 为 None / 无 reconfigure 的对象 |
+| 2 | **`--check-env` 在 exe 内挂死** | 现场表现为"敲了命令没反应"：找不到 `tools/check_env.py` → `ImportError` → 窗口程序（`console=False`）弹**模态错误框** → 无人值守时永久挂起（实测前台 300 s 无输出） | 三级查找 `bundle_root()/tools` → `app_base_dir()/tools` → `__file__` 同级；找不到时打印可读原因（含全部尝试路径）并返回 1，**绝不抛异常**；同时把 `tools/check_env.py` 打进 spec 的 `datas` |
+| 3 | **`--check-env` 误报 13 个"残缺包"** | 把 exe 自己的 `_MEIPASS` 扫成残缺包（`PySide6`/`numpy`/`PIL`/`rules`/`ui` …）并 exit 1 | PyInstaller 把纯 Python 模块编译进 **PYZ 归档**，`_MEIPASS` 只落地二进制与数据文件 → 「有文件但无 `__init__.py`」判据在打包态**根本不成立**。新增 `is_frozen()`，打包态下该节改为**明确声明「不适用」**（不再误报）；报告头加「运行形态」行 |
+| 4 | **`find_site_packages()` 摸到宿主机** | onefile 把依赖平铺解到 `sys._MEIPASS`（目录名不是 `site-packages`），原实现顺着 `sys.path` 一路找到**宿主环境**的目录 | 优先识别 `sys._MEIPASS`（存在且为目录时直接返回） |
+
+**连带发现（由 exe 自检抓出）**：`six` **没有被烤进 exe** ——
+PyInstaller 只按「静态可解析的 import」收集模块，而 `six` 在任何代码里都没有
+静态 import 点，于是静默漏收。已把 `six` / `colorlog` / `colorama` / `antlr4` /
+`flatbuffers` / `tqdm` 一并加入 spec 的 `collect_submodules` 清单，
+并新增 `test_spec_explicitly_collects_transitive_only_deps` 锁定（以后新增此类
+「传递依赖」若忘了加，测试直接红灯）。
+
+> **方法论记录**：这 4 个缺陷**全部只在打成 exe 之后才暴露**，源码态 629 用例
+> 全绿时一个都看不出。说明「源码测试通过」≠「交付物可用」——
+> **`--self-test` / `--check-env` 这类 exe 自检不是锦上添花，是交付前必须跑的一道关**。
+
 ### 明确不改（口径守住）
 
 两项曾被提出、**经复审后撤销**的改动，理由均援引 SOP 原文：
@@ -80,13 +103,17 @@
 
 | 项 | 结果 |
 |---|---|
-| 回归测试 | **629 用例 / 0 失败 / 0 错误**（`pytest -q`，RC=0） |
+| 回归测试 | **656 用例 / 0 失败 / 0 错误**（`pytest -q`，RC=0） |
 | 静态检查 | `ruff` All checks passed |
-| 环境体检 | `tools/check_env.py` exit 0（19 依赖 + 23 import + 无空壳包） |
+| 环境体检（源码态） | `tools/check_env.py` exit 0（19 依赖 + 23 import + 无空壳包） |
 | 真 OCR 端到端 | 113 张图 / 535.9 s（平均 4.74 s/张），四层硬断言 ALL PASS |
 | 离线回放一致性 | 与真 OCR 链路**四类分布完全一致** |
 | 原始输入只读 | 130 文件 / 394,140,543 字节，跑批前后 (文件名+size) sha256 一致 |
 | 修复前后分布 | ✅ 0→1 ／ ❌ 11→12 ／ ⚠️ 7→5 ／ 🔵 0→0 |
+| **exe 产物** | `dist/报关申报要素校验工具.exe`（149 MB，单文件，不入库） |
+| **exe `--self-test`** | exit 0，规则加载 / 13 列 / 口径字符串全部通过，✅ 正常输出 |
+| **exe `--check-env`** | 19 依赖版本核对 + 23 项模块 import 全过（空壳包扫描按打包态声明不适用） |
+
 
 ### 已知限制
 

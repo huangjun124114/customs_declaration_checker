@@ -219,3 +219,65 @@ def test_check_env_critical_deps_are_all_declared() -> None:
         "check_env 要核对的发行版未在 requirements.txt 声明："
         f"\n  {missing}"
     )
+
+
+# ─────────────────────────── 4. spec ↔ exe 内容 ───────────────────────────
+
+SPEC_PATH = PROJECT_ROOT / "customs_checker.spec"
+
+#: 仅被上游「声明为依赖」但代码里没有静态 import 的包 —— PyInstaller 的静态
+#: 分析扫不到它们，必须在 spec 里显式 collect，否则不会被烤进 exe。
+#:
+#: 这份名单是**实测产物**：`exe --check-env` 的逐包 import 验证报出
+#: ``six: ModuleNotFoundError`` 才暴露出来的（2026-09-16）。
+#: 新增此类「传递依赖」时，务必同步加到 spec 的 collect_submodules 清单。
+_TRANSITIVE_ONLY_PACKAGES = (
+    "six",
+    "colorlog",
+    "colorama",
+    "antlr4",
+    "flatbuffers",
+    "tqdm",
+)
+
+_COLLECT_CALL_RE = re.compile(r'collect_submodules\("([A-Za-z0-9_]+)"\)')
+#: spec 里 ``for pkg in (...): collect_submodules(pkg)`` 这种循环写法
+_COLLECT_LOOP_RE = re.compile(r"for pkg in \((.*?)\):", re.DOTALL)
+_QUOTED_NAME_RE = re.compile(r'"([A-Za-z0-9_]+)"')
+
+
+def _spec_collected_packages() -> set[str]:
+    """取出 ``customs_checker.spec`` 会被显式 collect 的包名集合。
+
+    兼容两种写法：`collect_submodules("lit")` 与
+    `for pkg in ("a", "b"): collect_submodules(pkg)`。
+    """
+    text = SPEC_PATH.read_text(encoding="utf-8")
+    names = set(_COLLECT_CALL_RE.findall(text))
+    for block in _COLLECT_LOOP_RE.findall(text):
+        names |= set(_QUOTED_NAME_RE.findall(block))
+    return names
+
+
+def test_spec_explicitly_collects_transitive_only_deps() -> None:
+    """spec 必须显式收集「无静态 import」的传递依赖，否则 exe 内会缺包。
+
+    实战背景：exe 里 ``six`` 缺失 —— PyInstaller 只按静态可解析的 import
+    收集模块，而 ``six`` 没有任何静态 import 点，于是静默漏收；
+    最后由 ``exe --check-env`` 的 import 验证抓出来。
+    """
+    collected = _spec_collected_packages()
+    missing = [pkg for pkg in _TRANSITIVE_ONLY_PACKAGES if pkg not in collected]
+    assert not missing, (
+        "customs_checker.spec 未显式收集以下包（PyInstaller 静态分析扫不到，会漏收进 exe）："
+        f"\n  {missing}\n请加入 spec 的 collect_submodules 清单。"
+    )
+
+
+def test_spec_collected_names_are_importable() -> None:
+    """spec 里写的包名必须真实可 import（防拼错名字导致 collect 静默失效）。"""
+    bad = []
+    for pkg in sorted(_spec_collected_packages()):
+        if importlib.util.find_spec(pkg) is None:
+            bad.append(pkg)
+    assert not bad, f"customs_checker.spec 中以下名称无法 import（疑似拼写错误）：\n  {bad}"

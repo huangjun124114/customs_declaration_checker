@@ -476,3 +476,50 @@ class TestFrozenScanNotApplicable:
         assert "SKIP" in text
         assert "不适用" in text
         assert "打包态" in text
+
+
+class TestFrozenVersionUnreadable:
+    """打包态「版本不可读但包在」必须降级为 OK，不能报 WARN。
+
+    实战背景（2026-09-16，exe 冒烟第三轮）：PyInstaller 不复制 dist-info，
+    于是 ``importlib.metadata`` 取不到 ``antlr4-python3-runtime`` / ``colorlog``
+    的版本 —— 但两个包都 import 成功。若照旧报 WARN，
+    ``exe --check-env`` 会**永远**返回 exit 2。
+
+    危害不在"多一行黄字"，而在于：现场工程师见它永远报警，就会学会忽略体检，
+    R11 防线随之失效 —— 这比缺包本身更危险。
+    """
+
+    def test_degrades_to_ok_when_module_importable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(check_env, "is_frozen", lambda: True)
+        monkeypatch.setattr(check_env, "_version_of", lambda *a, **kw: "")
+        monkeypatch.setattr(check_env, "_module_importable", lambda name: True)
+
+        report = check_env.CheckReport()
+        check_env.check_versions(report)
+
+        assert report.version_warnings == [], "打包态不得产生版本警告"
+        assert len(report.ok_versions) == len(check_env.CRITICAL_DEPS)
+        assert any("版本不可读" in item for item in report.ok_versions)
+        assert not report.fatal
+
+    def test_still_warns_when_module_missing_in_frozen(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """包真的不在时（import 失败）仍须报警 —— 降级不得掩盖真问题。"""
+        monkeypatch.setattr(check_env, "is_frozen", lambda: True)
+        monkeypatch.setattr(check_env, "_version_of", lambda *a, **kw: "")
+        monkeypatch.setattr(check_env, "_module_importable", lambda name: False)
+
+        report = check_env.CheckReport()
+        check_env.check_versions(report)
+
+        assert len(report.version_warnings) == len(check_env.CRITICAL_DEPS)
+
+    def test_dev_mode_still_warns(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """源码/开发态行为不变：取不到版本照旧 WARN（那里应当有 dist-info）。"""
+        monkeypatch.setattr(check_env, "is_frozen", lambda: False)
+        monkeypatch.setattr(check_env, "_version_of", lambda *a, **kw: "")
+
+        report = check_env.CheckReport()
+        check_env.check_versions(report)
+
+        assert len(report.version_warnings) == len(check_env.CRITICAL_DEPS)

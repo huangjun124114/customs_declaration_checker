@@ -38,8 +38,30 @@ datas += ort_datas
 binaries += list(ort_binaries)
 hiddenimports += list(ort_hiddenimports)
 
-# ── rapidocr 传递依赖的显式子模块（避免动态 import 漏收）───────────
-for pkg in ("omegaconf", "pyclipper", "shapely", "yaml"):
+# ── 传递依赖的显式子模块（避免动态 import / 纯元数据依赖被漏收）───────
+#
+# ⚠️ 这份清单是**实测补出来的**，不是照抄依赖表：
+#   PyInstaller 只按「静态可解析的 import」收集模块。若某个包仅被上游声明为
+#   依赖、代码里走的是动态 import（或干脆没 import），它就不会进包 ——
+#   而 `exe --check-env` 的逐包 import 验证会把它报出来（实测 `six` 就是
+#   这样被漏掉、由 exe 自检抓到的）。
+#   宁可多收几十 KB，也不要让 OCR 链路在客户现场才发现缺包。
+for pkg in (
+    "omegaconf",
+    "pyclipper",
+    "shapely",
+    "yaml",
+    # rapidocr / onnxruntime 的传递依赖（体积都很小，全部显式收进来）
+    "six",
+    "colorlog",
+    "colorama",
+    "antlr4",
+    "flatbuffers",
+    "tqdm",
+    # 结果导出与 Excel 探查
+    "openpyxl",
+    "et_xmlfile",
+):
     try:
         hiddenimports += collect_submodules(pkg)
     except Exception:

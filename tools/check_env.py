@@ -591,17 +591,33 @@ def _version_in_range(
 
 def check_versions(report: CheckReport) -> None:
     """核对关键依赖版本（写入 report）。"""
+    frozen = is_frozen()
     for pkg_name, import_name, lower, upper, desc in CRITICAL_DEPS:
         version = _version_of(import_name, dist_name=pkg_name)
         if not version:
-            # 版本拿不到不视为致命（有些包不暴露 __version__ 也无 dist-info），仅提示
-            report.version_warnings.append(f"{pkg_name}: 未安装或无法获取版本（{desc}）")
+            # 打包态：PyInstaller 不复制 dist-info，importlib.metadata 取不到版本，
+            # 但**包本身在**（第 2 节会逐包 import 验证）。
+            # 此时必须降级为「OK（版本不可读）」而不是 WARN —— 否则 `exe --check-env`
+            # 永远返回 exit 2，现场会逐渐学会忽略体检，R11 防线就废了。
+            if frozen and _module_importable(import_name):
+                report.ok_versions.append(f"{pkg_name} (版本不可读：打包态无 dist-info)  ({desc})")
+            else:
+                report.version_warnings.append(f"{pkg_name}: 未安装或无法获取版本（{desc}）")
             continue
         ok, note = _version_in_range(version, lower, upper)
         if ok:
             report.ok_versions.append(f"{pkg_name} {note}  ({desc})")
         else:
             report.version_warnings.append(f"{pkg_name}: {note}（{desc}）")
+
+
+def _module_importable(module_name: str) -> bool:
+    """该模块能否成功 import（判定「版本不可读」是环境限制还是真的缺包）。"""
+    try:
+        importlib.import_module(module_name)
+    except Exception:  # noqa: BLE001 - 任何异常都视为不可用
+        return False
+    return True
 
 
 def check_imports(report: CheckReport) -> None:
