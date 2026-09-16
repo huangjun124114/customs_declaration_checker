@@ -39,7 +39,7 @@ from core.judge_engine import JudgeEngine
 from core.kv_extractor import KvExtractor
 from core.models import CheckResult, DeclarationRecord, ExcelProbeResult, Fingerprint, Verdict
 from core.ocr_cache import OcrCache
-from core.ocr_engine import OcrEngine
+from core.ocr_engine import OcrEngine, default_ocr_workers
 from core.result_exporter import ResultExporter
 from core.resume_store import ResumeStore, build_resume_path, compute_excel_hash
 from core.rule_repository import RuleRepository
@@ -146,6 +146,13 @@ class CheckPipeline:
         batch_size_heavy: 图片多时批大小（缺省 3）。
         heavy_image_threshold: 单条图片数超过该值降批（缺省 8）。
         unreachable_k: 连续 K 条不可达自动暂停阈值（缺省 5）。
+        ocr_workers: 全局 OCR 并发预算（``None`` = ``min(8, cpu_count)``；仅当
+            ``ocr_engine`` 未注入时生效）。逐条记录内的并发上限，见
+            :meth:`_effective_workers`。
+        resize_long_side: 可选降采样长边（``0`` = **不降采样**，默认）。派发到 OCR 引擎
+            并**进入磁盘缓存的参数指纹**（硬约束，未开启时结果零漂移）。
+        ocr_intra_op_num_threads: 每引擎 onnxruntime 单算子线程数（``None`` = 由并发数
+            推导，保证总线程 ≤ 预算）。
         stop_flag: 中止标志（``threading.Event``）；``None`` 时新建。
         pause_flag: 暂停标志（``threading.Event``）；``None`` 时新建。
         stop_event_check_interval: 暂停时的轮询间隔（秒），避免忙等。
@@ -166,6 +173,9 @@ class CheckPipeline:
         batch_size_heavy: int = 3,
         heavy_image_threshold: int = 8,
         unreachable_k: int = DEFAULT_UNREACHABLE_K,
+        ocr_workers: int | None = None,
+        resize_long_side: int = 0,
+        ocr_intra_op_num_threads: int | None = None,
         stop_flag: threading.Event | None = None,
         pause_flag: threading.Event | None = None,
         stop_event_check_interval: float = 0.2,
@@ -179,7 +189,15 @@ class CheckPipeline:
             parser=ElementParser(self._repo)
         )
         self._resolver = resolver if resolver is not None else ImageResolver()
-        self._ocr = ocr_engine if ocr_engine is not None else OcrEngine()
+        if ocr_engine is not None:
+            self._ocr = ocr_engine
+        else:
+            self._ocr = OcrEngine(
+                max_workers=ocr_workers,
+                resize_long_side=resize_long_side,
+                intra_op_num_threads=ocr_intra_op_num_threads,
+            )
+        self._ocr_workers = max(1, int(getattr(self._ocr, "max_workers", default_ocr_workers())))
         self._judge = judge_engine if judge_engine is not None else JudgeEngine(self._repo)
         self._kv = kv_extractor if kv_extractor is not None else KvExtractor(self._repo)
         self._exporter = exporter
@@ -266,7 +284,11 @@ class CheckPipeline:
         records = list(probe_result.records)
 
         # ══ Phase2：图片三级索引匹配（干跑）══
-        self._resolve_evidences(records, share, resolved_ticket, emit)
+        resolve_notes = self._resolve_evidences(records, share, resolved_ticket, emit)
+        # ── P1 修复：把「索引降级 / 回退」信号落到 probe_result.notes（观测性缺口）──
+        #    这些 notes 最终随 PipelineResult.notes 上报，使降级不再静默。
+        if resolve_notes:
+            probe_result.notes.extend(resolve_notes)
 
         # ══ 断点存储 ══
         fingerprint = self._build_fingerprint(
@@ -288,6 +310,10 @@ class CheckPipeline:
                     allowed_root=(
                         allowed_process_root if allowed_process_root is not None else process_path
                     ),
+                    # ⚠️ 硬约束：降采样 / intra-op 参数必须进入缓存指纹，否则
+                    #    新旧结果混用 → 判定不可复现（架构设计 §3.5）。
+                    resize_long_side=int(getattr(self._ocr, "resize_long_side", 0)),
+                    intra_op_num_threads=int(getattr(self._ocr, "intra_op_num_threads", 2)),
                 )
                 attach = getattr(self._ocr, "attach_disk_cache", None)
                 if callable(attach):
@@ -519,8 +545,13 @@ class CheckPipeline:
         share: Path,
         ticket: str,
         emit: Callable[..., None],
-    ) -> None:
-        """Phase2：图片三级索引匹配（干跑，不跑 OCR）。"""
+    ) -> list[str]:
+        """Phase2：图片三级索引匹配（干跑，不跑 OCR）。
+
+        Returns:
+            本次匹配过程中产生的**降级 / 回退 WARN 记录**（由 ``ImageResolver``
+            累积），供调用方写入 ``probe_result.notes``（P1 观测性修复）。
+        """
         total = len(records)
         emit(PipelineProgress(phase="resolve", total=total, message="图片三级索引匹配（干跑）"))
         hit = 0
@@ -536,16 +567,25 @@ class CheckPipeline:
                 hit += 1
             if any(ev.unreachable for ev in evidences):
                 unreachable_count += 1
+
+        # ── 收集降级 / 回退信号（原缺陷：fallback_notes 从不进 notes）──
+        take = getattr(self._resolver, "take_fallback_notes", None)
+        fallback_notes: list[str] = take() if callable(take) else []
+        for note in fallback_notes:
+            emit(PipelineProgress(phase="resolve", total=total, message=note, level="WARN"))
+
         emit(
             PipelineProgress(
                 phase="resolve",
                 current=total,
                 total=total,
                 message=f"图片匹配完成：命中 {hit}/{total} 条记录"
-                + (f"，其中 {unreachable_count} 条共享盘不可达" if unreachable_count else ""),
+                + (f"，其中 {unreachable_count} 条共享盘不可达" if unreachable_count else "")
+                + (f"（降级/回退 {len(fallback_notes)} 次）" if fallback_notes else ""),
                 level="WARN" if unreachable_count else "INFO",
             )
         )
+        return fallback_notes
 
     def _process_record(self, record: DeclarationRecord, max_workers: int) -> CheckResult:
         """处理单条记录：OCR（并行）→ 判定，返回 :class:`core.models.CheckResult`。
@@ -744,9 +784,22 @@ class CheckPipeline:
         return self._batch_size
 
     def _effective_workers(self, record: DeclarationRecord) -> int:
-        """按图片数决定 OCR 并发（≤2，R8）。"""
+        """按图片数决定单条记录的 OCR 并发（≤ 全局预算 ``self._ocr_workers``）。
+
+        ⚠️ **并发拓扑（批次 3-A 决策：选项 (a)）** —— 仅抬高**单条记录内**的 worker
+        数到全局预算 ``min(8, cpu_count)``，**记录之间仍串行**。选择理由：
+          * 镜像保留既有控制流（记录级 中止/暂停 检查、逐条落盘、``unreachable``
+            自动暂停），风险最低；
+          * 本数据集单条记录普遍含 7–12 张图，**条内即可铺满 CPU**，残余损失仅限
+            记录边界（不像全局任务队列那样能吃掉边界空隙，但也不引入结果回填与
+            中止响应变慢的风险）。
+        曾经的问题：这里返回 ``2 if >1 else 1`` 且与 ``MAX_WORKERS_LIMIT=2`` 叠加，
+        使**全局实际并发恒为 2**。现改为使用全局预算。
+        """
         image_count = len([ev for ev in record.evidences if ev.image_path and ev.exists])
-        return 2 if image_count > 1 else 1
+        if image_count <= 1:
+            return 1
+        return max(1, min(image_count, self._ocr_workers))
 
     @staticmethod
     def _safe_key(record: DeclarationRecord | None) -> str:

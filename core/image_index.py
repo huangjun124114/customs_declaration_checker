@@ -241,23 +241,40 @@ class ImageIndex:
         Returns:
             证据列表（与实时链**完全一致**，含空列表）；索引未构建返回 ``None``。
         """
+        evidences, _level = self.resolve_with_level(part, order)
+        return evidences
+
+    def resolve_with_level(
+        self, part: str, order: str
+    ) -> tuple[list[ImageEvidence] | None, str]:
+        """同 :meth:`resolve`，但**额外返回命中所在层级**（供上层记降级 WARN）。
+
+        Args:
+            part: 料号（文件名第二段）。
+            order: 订单号（文件名首段）。
+
+        Returns:
+            ``(证据列表, 层级)``；层级 ∈ ``{"", "L1", "L2", "L3", "L4"}``：
+            * 索引未构建 → ``(None, "")``；
+            * 命中 / 未命中 → 对应层级 / ``""``（未命中说明四级全部落空）。
+        """
         if not self.built or self._root is None:
-            return None
+            return None, ""
 
         # O(1) 快速否决：全局无候选 → 任何层级都不可能命中（等价，且省去逐层扫描）
         if not self.has_any_candidate(order, part):
-            return []
+            return [], ""
 
-        evidences = self._level1(self._root, part, order)
-        if evidences:
-            return evidences
-        evidences = self._level2(self._root, part, order)
-        if evidences:
-            return evidences
-        evidences = self._level3(self._root, part, order)
-        if evidences:
-            return evidences
-        return self._level4(self._root, part, order)
+        for level, level_fn in (
+            ("L1", self._level1),
+            ("L2", self._level2),
+            ("L3", self._level3),
+            ("L4", self._level4),
+        ):
+            evidences = level_fn(self._root, part, order)
+            if evidences:
+                return evidences, level
+        return [], ""
 
     # ── 层级（与 ImageResolver._level1..4 一一对应）──
 

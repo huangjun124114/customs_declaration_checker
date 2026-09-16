@@ -467,9 +467,14 @@ class TestOcrEngineWithMock:
 
     @pytest.mark.parametrize("requested", [0, 1, 4, 99])
     def test_max_workers_clamped(self, requested: int) -> None:
-        """并发数被夹在 ``[1, 2]``（R8：防 CPU 线程爆炸）。"""
+        """并发数被夹在 ``[1, MAX_WORKERS_LIMIT]``（R8 守门常量）。
+
+        ⚠️ 批次 3-A 因《验收问题修复方案》Q6「放宽到 4–8」把上限由 2 改为 8，
+        故本断言随之更新（原先固定 ``<= 2``）；改为引用常量，避免再次硬编码。
+        """
         engine = OcrEngine(backend=_MockBackend(), max_workers=requested)
-        assert 1 <= engine.max_workers <= 2
+        assert 1 <= engine.max_workers <= OcrEngine.MAX_WORKERS_LIMIT
+        assert OcrEngine.MAX_WORKERS_LIMIT == 8
 
     def test_batch_concurrent_results_consistent(self, tmp_path: Path) -> None:
         """并发（``max_workers=2``）下批量结果仍与输入对齐。"""

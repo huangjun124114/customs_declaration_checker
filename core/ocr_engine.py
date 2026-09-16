@@ -11,14 +11,21 @@
   2. :class:`RapidOcrBackend` —— 真实实现，按 **rapidocr 3.x 新 API** 调用
      （⚠️ 不是 1.x 的 ``result, elapse = engine(path)`` 元组解包）。
 
-  3. :class:`OcrEngine` —— 编排层：批量并发（``ThreadPoolExecutor``，``max_workers≤2``）、
+  3. :class:`OcrEngine` —— 编排层：批量并发（``ThreadPoolExecutor``）、
      **按图片哈希缓存**、单张失败容错、低置信度标注。
 
 关键约定（硬约束，来自架构设计 9.7 / 13.4 / R8）：
   * **禁止** ``cv2.imread(path)`` —— 中文 / UNC 路径会**静默失败返回 ``None``**（已实测）。
     统一用 ``np.frombuffer(open(path, 'rb').read(), np.uint8)`` + ``cv2.imdecode(...)``。
-  * onnxruntime ``intra_op_num_threads=2``、``inter_op_num_threads=1``，外层
-    ``max_workers≤2`` —— 防止 CPU 线程爆炸（R8）。
+  * **并发与线程预算（R8 的演进，批次 3-A）**：默认并发 ``min(8, cpu_count)``（可被
+    环境变量 ``CUSTOMS_OCR_WORKERS`` 覆盖，现场可回调到 2）。R8 原意是防
+    onnxruntime **线程爆炸**，关键换算是 **总线程数 ≈ worker 数 × 每引擎
+    ``intra_op_num_threads``**；因此本模块用「**更多 worker × 每引擎更少 intra-op**」
+    换吞吐：``intra_op = clamp(1, 2, DEFAULT_THREAD_BUDGET // workers)``，总预算 8：
+      * 2 worker × 2 intra = 4（与 v0.1.0 完全一致，**不改变既有行为**）；
+      * 8 worker × 1 intra = 8（铺满 8 核仍不超订阅）。
+  * **每 worker 独立引擎实例（R2）**：:class:`RapidOcrBackend` 用 ``threading.local()``
+    按线程隔离引擎，避免多线程共享同一 onnxruntime session（构造约 0.5s，可接受）。
   * **缓存 key 用图片内容哈希**（非路径），避免同一张图在不同路径下重复 OCR。
   * **只读红线**：图片只以读字节方式访问，**不复制、不移动、不改名**。
 
@@ -46,6 +53,10 @@ __all__ = [
     "DEFAULT_CONFIDENCE_THRESHOLD",
     "DEFAULT_HASH_CHUNK_SIZE",
     "DEFAULT_CACHE_MAX_ENTRIES",
+    "DEFAULT_THREAD_BUDGET",
+    "WORKERS_ENV_VAR",
+    "default_ocr_workers",
+    "default_intra_op_threads",
     "OcrBackend",
     "RapidOcrBackend",
     "OcrEngine",
@@ -61,6 +72,56 @@ DEFAULT_HASH_CHUNK_SIZE: int = 1024 * 1024
 
 #: OCR 结果缓存的最大条目数（LRU 淘汰；防止长跑批内存无界增长）。
 DEFAULT_CACHE_MAX_ENTRIES: int = 512
+
+#: R8 缓解：并发线程总预算。**总线程数 ≈ worker 数 × 每引擎 intra_op 线程数**，
+#: 本预算即二者的乘积上限（默认 8，对应 8 核机器）。
+DEFAULT_THREAD_BUDGET: int = 8
+
+#: 环境变量名：覆盖默认 OCR 并发数（现场可 ``set CUSTOMS_OCR_WORKERS=2`` 回调）。
+WORKERS_ENV_VAR: str = "CUSTOMS_OCR_WORKERS"
+
+
+def default_ocr_workers() -> int:
+    """默认 OCR 并发数 = ``min(8, os.cpu_count() or 2)``；环境变量可覆盖。
+
+    优先级：``CUSTOMS_OCR_WORKERS``（合法正整数）> ``min(8, cpu_count or 2)``。
+    环境变量非法（非整数 / ≤0）时**不抛异常**，静默退回 CPU 推导 —— 现场设置
+    错值不应导致程序崩溃。返回值统一夹在 ``[1, DEFAULT_THREAD_BUDGET]``（硬上限）。
+
+    Returns:
+        并发数（``1..DEFAULT_THREAD_BUDGET``）。
+    """
+    raw = os.environ.get(WORKERS_ENV_VAR, "").strip()
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = 0
+        if value > 0:
+            return max(1, min(DEFAULT_THREAD_BUDGET, value))
+    return max(1, min(DEFAULT_THREAD_BUDGET, os.cpu_count() or 2))
+
+
+def default_intra_op_threads(workers: int) -> int:
+    """按 worker 数推导**每引擎** onnxruntime 单算子线程数（R8 换算）。
+
+    换算关系（务必牢记）：**总线程数 ≈ worker 数 × ``intra_op_num_threads``**。
+    为使总线程 ≤ :data:`DEFAULT_THREAD_BUDGET`（8）同时最大化并行：
+
+      * ``workers=2`` → ``intra=2`` → 总 4（与 v0.1.0 既有行为一致）；
+      * ``workers=8`` → ``intra=1`` → 总 8（更多 worker × 更少 intra 换吞吐）；
+      * ``workers=4`` → ``intra=2`` → 总 8。
+
+    ``intra`` 上限固定为 2：单引擎 intra 超过 2 收益递减且加剧过订阅。
+
+    Args:
+        workers: 并发 worker 数。
+
+    Returns:
+        单引擎 intra_op 线程数（1 或 2）。
+    """
+    w = max(1, int(workers))
+    return max(1, min(2, DEFAULT_THREAD_BUDGET // w))
 
 
 def _compute_image_hash(image_path: str | os.PathLike[str]) -> str:
@@ -185,8 +246,10 @@ class RapidOcrBackend(OcrBackend):
     ⚠️ **API 形态必须照此实现**（rapidocr 3.x，与 1.x 完全不同）：
 
     * 导入：``from rapidocr import RapidOCR``（惰性导出，``dir()`` 看不到但可 import）；
-    * 构造：``RapidOCR()``（初始化约 0.5s，模型加载很快）；
-    * 调用：``engine(str(image_path))`` —— **传路径字符串**；
+    * 构造：``RapidOCR(param=...)``（初始化约 0.5s，模型加载很快）；线程数键为
+      ``EngineConfig.onnxruntime.intra_op_num_threads`` / ``inter_op_num_threads``
+      （**默认 ``-1`` = 用满全部物理核**，故必须显式限流，见 :meth:`_build_engine`）；
+    * 调用：``engine(str(image_path))`` —— **传路径字符串**；亦可传 ``numpy.ndarray``；
     * 取文本：``res.txts`` —— **``RapidOCRResult`` 对象属性**，不是元组解包；
     * 其他属性：``res.boxes`` / ``res.scores``。
 
@@ -195,11 +258,20 @@ class RapidOcrBackend(OcrBackend):
     中文 / UNC 路径：``RapidOCR(str(path))`` 内部自行读图且**中文路径安全**
     （已实测 ``2660308M图片\\…&001.jpg`` 识别成功）。为满足架构设计 9.7 的
     「统一 ``imdecode``」约定与可测试性，本类另提供 :meth:`load_image_array`
-    作为**自备图像读取**通道（中文路径实锤断言用），并可用于未来自管预处理。
+    作为**自备图像读取**通道（中文路径实锤断言用），并用于可选降采样预处理。
+
+    **线程模型（R2，批次 3-A 改造）**：引擎实例**按线程隔离**（``threading.local()``）。
+    每个 worker 线程持有**独立** onnxruntime session，杜绝多线程共享同一 session
+    的线程安全风险；引擎构造约 0.5s，可接受。注入的 ``engine``（仅供测试）则
+    **全线程共享**（mock 无状态，无需隔离）。
 
     Args:
         intra_op_num_threads: onnxruntime 单算子线程数（R8，默认 2）。
         inter_op_num_threads: onnxruntime 算子间线程数（R8，默认 1）。
+        resize_long_side: 可选降采样长边（``0`` = **不降采样**，默认）。仅当原图长边
+            大于该值时按 ``INTER_AREA`` 等比缩小，否则原样。⚠️ 该参数**必须同步进入**
+            :class:`core.ocr_cache.OcrCache` 的 ``params_fingerprint``（硬约束），
+            否则新旧缓存混用会导致判定不可复现。
         engine: 可选的已构造引擎（**仅供测试注入 mock**；``None`` 时惰性构造）。
     """
 
@@ -208,52 +280,84 @@ class RapidOcrBackend(OcrBackend):
         intra_op_num_threads: int = 2,
         inter_op_num_threads: int = 1,
         *,
+        resize_long_side: int = 0,
         engine: Any | None = None,
     ) -> None:
         self._intra_op_num_threads = max(1, int(intra_op_num_threads))
         self._inter_op_num_threads = max(1, int(inter_op_num_threads))
-        self._engine: Any | None = engine
-        self._lock = threading.Lock()
+        self._resize_long_side = max(0, int(resize_long_side))
+        self._injected_engine: Any | None = engine
+        self._local = threading.local()
         self._log = get_logger(Phase.OCR)
 
-    # ── 引擎构造 ──────────────────────────────────────────────
+    # ── 引擎构造（按线程隔离）─────────────────────────────────
 
     def _ensure_engine(self) -> Any:
-        """惰性构造 RapidOCR 引擎（线程安全；构造约 0.5s）。
+        """返回**本线程**的 RapidOCR 引擎（惰性构造；构造约 0.5s）。
+
+        注入的 ``engine`` 优先且**跨线程共享**；否则每个线程各建一个实例
+        （``threading.local()``，落实风险 R2「每 worker 独立引擎」）。
 
         Returns:
             ``RapidOCR`` 实例（或测试注入的 mock engine）。
         """
-        if self._engine is not None:
-            return self._engine
-        with self._lock:
-            if self._engine is None:
-                from rapidocr import RapidOCR  # 惰性导入：避免 import 期加载模型
+        if self._injected_engine is not None:
+            return self._injected_engine
+        engine = getattr(self._local, "engine", None)
+        if engine is None:
+            engine = self._build_engine()
+            self._local.engine = engine
+        return engine
 
-                params: dict[str, Any] = {
-                    "Global.intra_op_num_threads": self._intra_op_num_threads,
-                    "Global.inter_op_num_threads": self._inter_op_num_threads,
-                }
-                self._engine = self._construct_engine(RapidOCR, params)
-            return self._engine
+    def _build_engine(self) -> Any:
+        """构造一个新的 RapidOCR 引擎（延后 import，避免 import 期加载模型）。
 
-    @staticmethod
-    def _construct_engine(engine_cls: Any, params: dict[str, Any]) -> Any:
+        线程数通过 **``EngineConfig.onnxruntime.*``** 参数显式设置（实测有效键，
+        见下）；**每引擎 intra_op** 越小，可并发 worker 越多而总线程不超预算
+        （见 :func:`default_intra_op_threads`）。
+
+        ⚠️ **实测陷阱（批次 3-A 修复）**：rapidocr 3.x 的 ``RapidOCR`` 签名是
+        ``__init__(self, config_path=None, params=None)``：
+          * 线程键**必须**是 ``EngineConfig.onnxruntime.intra_op_num_threads`` /
+            ``inter_op_num_threads``（默认 ``-1`` = onnxruntime 用满全部物理核）；
+            ``Global.intra_op_num_threads`` 是**非法键**，会抛 ``ValueError``。
+          * ``params`` 是**关键字参数**；把 dict 当第一个位置参数传（``RapidOCR(d)``）
+            会被当成 ``config_path`` 而抛 ``TypeError``。
+          历史上两处都踩过 → 引擎静默退回无参构造 → intra_op 从未生效，单次推理
+          吃掉 ~24 线程（实测 parallelism≈24）。
+
+        Returns:
+            新的 ``RapidOCR`` 实例。
+        """
+        from rapidocr import RapidOCR  # 惰性导入：避免 import 期加载模型
+
+        params: dict[str, Any] = {
+            "EngineConfig.onnxruntime.intra_op_num_threads": self._intra_op_num_threads,
+            "EngineConfig.onnxruntime.inter_op_num_threads": self._inter_op_num_threads,
+        }
+        return self._construct_engine(RapidOCR, params)
+
+    def _construct_engine(self, engine_cls: Any, params: dict[str, Any]) -> Any:
         """构造引擎，兼容不同 rapidocr 小版本的构造签名。
 
-        优先按 13.3 的 ``RapidOCR()`` 直调（带线程数参数）；若该版本不接受
-        参数则回退为无参构造（线程数交由 onnxruntime 默认，功能不受影响）。
+        优先 ``engine_cls(params=params)``（线程数显式生效）；若该版本不接受
+        ``params`` 关键字或键名非法（``TypeError`` / ``ValueError``）则回退为无参
+        构造（线程数交由 onnxruntime 默认，功能不受影响），并记 WARN —— **不静默**，
+        便于现场发现「线程预算未生效」。
 
         Args:
             engine_cls: ``RapidOCR`` 类。
-            params: 线程数参数。
+            params: 线程数参数（``EngineConfig.onnxruntime.*``）。
 
         Returns:
             引擎实例。
         """
         try:
-            return engine_cls(params)
-        except TypeError:
+            return engine_cls(params=params)
+        except (TypeError, ValueError) as exc:
+            self._log.warning(
+                f"OCR 引擎不接受线程数参数（回退 onnxruntime 默认，线程预算不生效）：{exc}"
+            )
             return engine_cls()
 
     # ── 图像读取（中文 / UNC 路径安全）────────────────────────
@@ -286,10 +390,43 @@ class RapidOcrBackend(OcrBackend):
         buf = np.frombuffer(raw, dtype=np.uint8)
         return cv2.imdecode(buf, cv2.IMREAD_COLOR)
 
+    @staticmethod
+    def downscale_for_ocr(image: Any, long_side: int) -> Any:
+        """可选降采样：长边缩到 ``≤ long_side``（保持宽高比）。
+
+        仅当 ``long_side > 0`` 且原图长边更大时缩放（``INTER_AREA``，缩小最优）；
+        否则**原样返回同一对象**（零拷贝，避免无谓开销）。**默认关闭**
+        （``long_side = 0``）—— 未开启时 :meth:`recognize` 根本不走本方法。
+
+        Args:
+            image: BGR ``numpy.ndarray``。
+            long_side: 目标长边上限（``0`` = 不缩放）。
+
+        Returns:
+            缩放后（或原样）的 ``numpy.ndarray``；``image`` 为 ``None`` 时返回 ``None``。
+        """
+        if image is None or long_side <= 0:
+            return image
+        height, width = image.shape[:2]
+        longest = max(height, width)
+        if longest <= long_side:
+            return image
+
+        import cv2
+
+        scale = long_side / float(longest)
+        new_w = max(1, int(round(width * scale)))
+        new_h = max(1, int(round(height * scale)))
+        return cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
     # ── 接口实现 ──────────────────────────────────────────────
 
     def recognize(self, image_path: str | os.PathLike[str]) -> OcrText:
         """识别单张图片（rapidocr 3.x API）。
+
+        ⚠️ 降采样未开启（``resize_long_side = 0``，默认）时**保持传路径字符串**，
+        与 v0.1.0 **逐字节一致** —— baseline 不引入任何解码/预处理差异。仅当显式
+        开启降采样时，才走自备 ``imdecode`` 通道并按长边等比缩小。
 
         Args:
             image_path: 图片路径。
@@ -307,8 +444,16 @@ class RapidOcrBackend(OcrBackend):
             raise FileNotFoundError(f"image not found: {p}")
 
         engine = self._ensure_engine()
-        # ⚠️ 传路径字符串；3.x 返回 RapidOCRResult 对象（非元组）
-        result = engine(str(p))
+        if self._resize_long_side > 0:
+            image = self.load_image_array(p)
+            if image is not None:
+                result = engine(self.downscale_for_ocr(image, self._resize_long_side))
+            else:
+                # 自备解码失败 → 安全退回路径通道（功能不受影响）
+                result = engine(str(p))
+        else:
+            # ⚠️ 传路径字符串；3.x 返回 RapidOCRResult 对象（非元组）
+            result = engine(str(p))
 
         # ⚠️ res.txts / res.scores / res.boxes 可能是 numpy 数组，必须走 _safe_sequence
         #    （直接 `or []` 会因数组布尔求值歧义抛 ValueError）
@@ -336,9 +481,12 @@ class RapidOcrBackend(OcrBackend):
             self._log.warning(f"OCR 引擎预热失败（将在首次识别时重试）：{exc}")
 
     def close(self) -> None:
-        """释放引擎引用（进程退出 / 测试清理用）。"""
-        with self._lock:
-            self._engine = None
+        """释放**本线程**的引擎引用（进程退出 / 测试清理用）。
+
+        注入的引擎不在此处释放（归调用方所有）；``threading.local()`` 重建后
+        本线程引擎引用被丢弃，其它线程各自按需重建。
+        """
+        self._local = threading.local()
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -396,8 +544,9 @@ class OcrEngine:
     """OCR 编排层（架构设计第 4 节 ``OcrEngine``）。
 
     职责：
-      * **批量并发**：``recognize_batch`` 用 ``ThreadPoolExecutor(max_workers≤2)``
-        并行同条记录的多张图（R8：限制并发，防 CPU 线程爆炸）；
+      * **批量并发**：``recognize_batch`` 用 ``ThreadPoolExecutor`` 并行同条记录的
+        多张图；默认并发 ``min(8, cpu_count)``（可经环境变量 ``CUSTOMS_OCR_WORKERS``
+        覆盖）。**总线程 ≈ workers × 每引擎 intra_op ≤ 8**（R8 缓解，详见模块头）。
       * **单张失败不中断**：任一张抛异常 → 该张返回低置信占位并记 WARN（契约要求）；
       * **两级缓存**：L1 进程内 LRU（``_LruCache``）+ L2 磁盘缓存（``core.ocr_cache``）；
         命中缓存直接返回，避免重复 OCR（key = 图片内容 sha256）；
@@ -405,31 +554,49 @@ class OcrEngine:
 
     Args:
         backend: OCR 后端；``None`` 时惰性构造 :class:`RapidOcrBackend`。
-        max_workers: 并发线程数（**会被夹在 1–2**，落实 R8）。
+        max_workers: 并发线程数；``None`` 时取 :func:`default_ocr_workers`
+            （``min(8, cpu_count)``，环境变量可覆盖）。最终夹在 ``[1, 8]``。
         confidence_threshold: 低置信度阈值（默认 0.5）。
         cache_enabled: 是否启用哈希缓存（默认 ``True``）。
         cache_max_entries: 缓存最大条目数。
         hash_fn: 图片哈希函数（**供测试注入**；默认内容 sha256）。
         disk_cache: L2 磁盘缓存（``core.ocr_cache.OcrCache``）；``None`` 时仅用 L1，
             可后续经 :meth:`attach_disk_cache` 挂载。
+        resize_long_side: 可选降采样长边（``0`` = **不降采样**，默认）。派发到后端，
+            并**必须同步进入** :class:`core.ocr_cache.OcrCache` 的 ``params_fingerprint``。
+        intra_op_num_threads: 每引擎 onnxruntime 单算子线程数；``None`` 时按
+            :func:`default_intra_op_threads` 由并发数推导（总线程 ≤ 预算）。
     """
 
-    #: 并发上限（R8：``max_workers≤2``）
-    MAX_WORKERS_LIMIT: int = 2
+    #: 并发硬上限（R8）。原为 2；批次 3-A 放宽到 8，配套缓解手段：
+    #: ① 每引擎 intra_op 收缩到 ``default_intra_op_threads``（总线程 ≤ 8）；
+    #: ② 每 worker 独立引擎实例（``RapidOcrBackend`` 按线程隔离）。
+    #: ⚠️ **不要**把它删掉 —— 它是「防 onnxruntime 线程爆炸」的守门常量，
+    #: 保留是为了让后来者一眼看到这里曾因 R8 被夹到 2，以及现在换成了什么手段。
+    MAX_WORKERS_LIMIT: int = DEFAULT_THREAD_BUDGET
 
     def __init__(
         self,
         backend: OcrBackend | None = None,
-        max_workers: int = 2,
+        max_workers: int | None = None,
         confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
         *,
         cache_enabled: bool = True,
         cache_max_entries: int = DEFAULT_CACHE_MAX_ENTRIES,
         hash_fn: Callable[[str | os.PathLike[str]], str] | None = None,
         disk_cache: OcrCache | None = None,
+        resize_long_side: int = 0,
+        intra_op_num_threads: int | None = None,
     ) -> None:
         self._backend = backend
-        self._max_workers = self._clamp_workers(max_workers)
+        requested = default_ocr_workers() if max_workers is None else max_workers
+        self._max_workers = self._clamp_workers(requested)
+        self._resize_long_side = max(0, int(resize_long_side))
+        self._intra_op = (
+            default_intra_op_threads(self._max_workers)
+            if intra_op_num_threads is None
+            else max(1, int(intra_op_num_threads))
+        )
         self._threshold = float(confidence_threshold)
         self._cache_enabled = bool(cache_enabled)
         self._cache = _LruCache(cache_max_entries)
@@ -441,7 +608,7 @@ class OcrEngine:
 
     @classmethod
     def _clamp_workers(cls, value: int) -> int:
-        """把并发数夹在 ``[1, MAX_WORKERS_LIMIT]``（R8 强制）。"""
+        """把并发数夹在 ``[1, MAX_WORKERS_LIMIT]``（R8 守门常量强制）。"""
         try:
             n = int(value)
         except (TypeError, ValueError):
@@ -463,15 +630,28 @@ class OcrEngine:
 
     @property
     def backend(self) -> OcrBackend:
-        """返回底层后端（惰性构造 :class:`RapidOcrBackend`）。"""
+        """返回底层后端（惰性构造 :class:`RapidOcrBackend`，带本引擎的线程/降采样参数）。"""
         if self._backend is None:
-            self._backend = RapidOcrBackend()
+            self._backend = RapidOcrBackend(
+                intra_op_num_threads=self._intra_op,
+                resize_long_side=self._resize_long_side,
+            )
         return self._backend
 
     @property
     def max_workers(self) -> int:
-        """实际生效的并发数（已夹在 1–2）。"""
+        """实际生效的并发数（已夹在 ``[1, MAX_WORKERS_LIMIT]``）。"""
         return self._max_workers
+
+    @property
+    def intra_op_num_threads(self) -> int:
+        """每引擎 onnxruntime 单算子线程数（参与磁盘缓存参数指纹）。"""
+        return self._intra_op
+
+    @property
+    def resize_long_side(self) -> int:
+        """生效的降采样长边（``0`` = 不降采样；参与磁盘缓存参数指纹）。"""
+        return self._resize_long_side
 
     @property
     def cache(self) -> _LruCache:
@@ -590,16 +770,22 @@ class OcrEngine:
     def recognize_batch(
         self,
         paths: list[str | os.PathLike[str]],
-        max_workers: int = 2,
+        max_workers: int | None = None,
     ) -> list[OcrText]:
         """批量识别（**单张失败不中断**，架构设计第 4 节契约）。
 
-        并发策略：``ThreadPoolExecutor(max_workers≤2)``；结果按输入顺序返回。
-        单张失败由 :meth:`recognize_one` 兜底为低置信占位，**不会中断整批**。
+        并发策略：``ThreadPoolExecutor``；结果按输入顺序返回。``max_workers`` 为
+        ``None`` 时用本引擎配置的并发数（默认 ``min(8, cpu_count)``）；显式传入
+        则夹在 ``[1, MAX_WORKERS_LIMIT]``。单张失败由 :meth:`recognize_one` 兜底为
+        低置信占位，**不会中断整批**。
+
+        ⚠️ **并发不改变结果**：结果按 ``paths`` **等长同序**返回，且每张图的
+        ``text_raw`` / ``confidence`` 只取决于**该图内容**（不依赖线程调度），
+        故 ``workers=2`` 与 ``workers=8`` 的输出逐字段一致。
 
         Args:
             paths: 图片路径列表。
-            max_workers: 并发数（会被夹在 1–2，R8）。
+            max_workers: 并发数；``None`` = 用引擎配置（夹在 ``[1, 8]``）。
 
         Returns:
             与 ``paths`` **等长且同序**的 :class:`core.models.OcrText` 列表。
@@ -609,7 +795,7 @@ class OcrEngine:
         if not path_list:
             return []
 
-        workers = self._clamp_workers(max_workers)
+        workers = self._max_workers if max_workers is None else self._clamp_workers(max_workers)
         if workers <= 1 or len(path_list) == 1:
             return [self.recognize_one(p) for p in path_list]
 

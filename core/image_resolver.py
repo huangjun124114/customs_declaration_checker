@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Callable
 from pathlib import Path
 
 from core.models import DeclarationRecord, ImageEvidence
@@ -246,14 +247,27 @@ class ImageResolver:
             return [self._not_found_evidence(base, part)]
 
         # ── 四级降级链（v0.2.0 点 7：优先走**单次扫描**的内存倒排索引）──
-        #    ⚠️ 索引仅"省去重复扫描"，命中集合与实时链**逐条等价**（由
-        #    tests/test_image_index.py 断言）；索引不可用时**回退**实时四级链。
+        #    ⚠️⚠️ **实际拓扑（别再误读成「索引未命中 → 回退实时链」）**：
+        #      路 A（索引可用）：``ImageIndex.resolve`` **内部逐条复现 L1–L4** 后
+        #          **直接返回**（L1 精确 → L2 模糊 → L3 子目录 → L4 根解析），
+        #          **不会**再调用 :meth:`_live_chain`；命中集合与实时链**逐条等价**
+        #          （由 tests/test_image_index.py 断言）。
+        #      路 B（索引不可用）：``_try_index`` 返回 ``None`` → 记一条 WARN 后走
+        #          :meth:`_live_chain` 实时四级链。
+        #    **两条路都必须在发生「降级」时留下 WARN**（写进 ``probe_result.notes``）：
+        #    路 B 进入即记；两路在 L2/L3/L4（非 L1 精确）命中时同样记。统一登记到
+        #    :attr:`fallback_notes`，由 ``CheckPipeline`` 汇总进 ``probe_result.notes``。
         if self._index_enabled:
             index = self._try_index(base)
             if index is not None:
-                evidences = index.resolve(part, order)
+                evidences, level = index.resolve_with_level(part, order)
                 if evidences is not None:
-                    if not evidences:
+                    if evidences and level and level != "L1":
+                        self._note_fallback(
+                            f"图片倒排索引在 {level} 降级命中（{len(evidences)} 张）："
+                            f"票号={ticket or '-'} 料号={part or '-'} 订单={order or '-'}"
+                        )
+                    elif not evidences:
                         self._log.info(
                             f"未匹配到图片（索引）：票号={ticket or '-'} "
                             f"料号={part or '-'} 订单={order or '-'}"
@@ -292,27 +306,45 @@ class ImageResolver:
         return index
 
     def _note_fallback(self, message: str) -> None:
-        """记录一次「回退实时链」事件（供上层写入 notes）。"""
+        """记录一次「降级 / 回退」事件（供上层写入 ``probe_result.notes``）。"""
         self.fallback_notes.append(message)
         self._log.warning(message)
 
+    def take_fallback_notes(self) -> list[str]:
+        """取出并清空累积的降级 WARN 记录（供 ``CheckPipeline`` 汇总进 notes）。
+
+        单次跑批内多条记录可能触发多次降级；本方法一次性取走并重置，避免跨跑批
+        重复登记（若复用同一 :class:`ImageResolver` 实例）。
+
+        Returns:
+            自上次调用以来累积的降级记录（保序）。
+        """
+        notes = list(self.fallback_notes)
+        self.fallback_notes = []
+        return notes
+
     def _live_chain(self, base: Path, part: str, order: str) -> list[ImageEvidence]:
-        """四级降级链（实时扫描；索引不可用时的**回退**路径，语义与旧实现一致）。"""
-        evidences = self._level1_exact_part_dir(base, part, order)
-        if evidences:
-            return evidences
+        """四级降级链（实时扫描；索引不可用时的**回退**路径，语义与旧实现一致）。
 
-        evidences = self._level2_fuzzy_part_dir(base, part, order)
-        if evidences:
-            return evidences
-
-        evidences = self._level3_scan_subfolders(base, part, order)
-        if evidences:
-            return evidences
-
-        evidences = self._level4_scan_root(base, part, order)
-        if evidences:
-            return evidences
+        逐级尝试、命中即返回；若在 **L2/L3/L4（非 L1 精确）** 命中，额外
+        :meth:`_note_fallback` 记一条「降级命中」WARN，供上层写入 ``probe_result.notes``
+        （修复观测性缺口：降级信号此前从不进 notes）。
+        """
+        steps: tuple[tuple[str, Callable[[Path, str, str], list[ImageEvidence]]], ...] = (
+            ("L1", self._level1_exact_part_dir),
+            ("L2", self._level2_fuzzy_part_dir),
+            ("L3", self._level3_scan_subfolders),
+            ("L4", self._level4_scan_root),
+        )
+        for level, level_fn in steps:
+            evidences = level_fn(base, part, order)
+            if evidences:
+                if level != "L1":
+                    self._note_fallback(
+                        f"实时四级链在 {level} 降级命中（{len(evidences)} 张）："
+                        f"票号={base.name or '-'} 料号={part or '-'} 订单={order or '-'}"
+                    )
+                return evidences
 
         self._log.info(
             f"未匹配到图片：票号={base.name or '-'} 料号={part or '-'} 订单={order or '-'}"

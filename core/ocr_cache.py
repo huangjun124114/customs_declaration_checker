@@ -12,10 +12,17 @@
 内容计算（否则「原图 → 降采样图」会被误判为同一张）；参数变化通过
 ``params_fingerprint`` 参与命中判定，避免"旧参数结果被新参数复用"。
 
-**命中条件**（三者**全部**相等，任一不等即 MISS 并重新 OCR）：
+**命中条件**（**全部**相等，任一不等即 MISS 并重新 OCR）：
   1. ``image_hash`` 相等；
   2. ``engine.name`` 与 ``engine.version`` 相等；
-  3. ``params_fingerprint``（``resize_long_side`` / ``intra_op_num_threads``）相等。
+  3. ``engine_fingerprint``（**次级指纹**：引擎包内文件列表摘要，见下）相等；
+  4. ``params_fingerprint``（``resize_long_side`` / ``intra_op_num_threads``）相等。
+
+**次级指纹（批次 3-A 修复 P2）**：``engine.version`` 在打包态（无 ``*.dist-info``）
+会降级为 ``"unknown"``，而 ``"unknown" == "unknown"`` 会**误判为命中** → 引擎换版后
+静默复用旧结果。故新增 :func:`detect_engine_fingerprint`：对 rapidocr 包内
+``(相对路径, size, mtime_ns)`` 列表取 sha256，作为**独立于 version** 的版本校验。
+**保守红线**：指纹读不到（空串）时**一律 MISS**（宁可重 OCR，也绝不错误 HIT）。
 
 **容错红线**：
   * 写失败**不得**静默吞掉 —— 记 WARN 但**容忍**（下次跑批会重试）；
@@ -34,6 +41,8 @@ dist-info 时降级为 ``"unknown"`` 且**不抛异常**（历史缺陷 10：打
 from __future__ import annotations
 
 import datetime as _dt
+import hashlib
+import importlib.util
 import json
 import os
 import threading
@@ -54,6 +63,7 @@ __all__ = [
     "CacheStats",
     "OcrCache",
     "detect_engine_version",
+    "detect_engine_fingerprint",
     "read_image_size",
 ]
 
@@ -92,6 +102,90 @@ def detect_engine_version(dist_name: str = "rapidocr") -> str:
         return _UNKNOWN_VERSION
     except Exception:  # noqa: BLE001 - 元数据损坏等一律降级
         return _UNKNOWN_VERSION
+
+
+def _package_dir(dist_name: str) -> str:
+    """定位分发包的安装目录（读不到返回空串，**不抛异常**）。"""
+    try:
+        spec = importlib.util.find_spec(dist_name)
+    except Exception:  # noqa: BLE001 - 极端环境下 find_spec 可能抛
+        return ""
+    if spec is None:
+        return ""
+    locations = list(spec.submodule_search_locations or [])
+    if locations:
+        return str(locations[0])
+    if spec.origin:
+        return os.path.dirname(spec.origin)
+    return ""
+
+
+#: 次级指纹缓存（一次计算，进程内复用；避免每次建 OcrCache 都遍历包目录）。
+_FINGERPRINT_CACHE: dict[str, str] = {}
+_FINGERPRINT_CACHE_LOCK = threading.Lock()
+
+
+def detect_engine_fingerprint(dist_name: str = "rapidocr") -> str:
+    """计算引擎**次级指纹**：包内文件 ``(相对路径, size, mtime_ns)`` 的 sha256。
+
+    用于弥补 ``engine.version`` 在打包态降级为 ``"unknown"`` 时的**命中判定漏洞**
+    （``"unknown" == "unknown"`` 会误判为命中 → 引擎换版后静默复用旧结果）。
+    只要包内文件发生增删改（含版本升级替换），指纹即变化 → 缓存 MISS。
+
+    ⚠️ **保守红线**：包目录不可定位 / 无文件 / 读取异常 → 返回 ``""``；
+    调用方（:class:`OcrCache`）遇到空指纹**一律判 MISS**，绝不因"双方都读不到"
+    而误判命中。
+
+    Args:
+        dist_name: 分发包名（默认 ``"rapidocr"``）。
+
+    Returns:
+        十六进制 sha256；不可读返回空串。
+
+    Note:
+        结果按 ``dist_name`` 进程内缓存；遍历包目录仅首次发生（实测 175 个文件，
+        毫秒级，对启动无可见影响）。
+    """
+    with _FINGERPRINT_CACHE_LOCK:
+        cached = _FINGERPRINT_CACHE.get(dist_name)
+    if cached is not None:
+        return cached
+
+    value = _compute_package_fingerprint(dist_name)
+    with _FINGERPRINT_CACHE_LOCK:
+        _FINGERPRINT_CACHE[dist_name] = value
+    return value
+
+
+def _compute_package_fingerprint(dist_name: str) -> str:
+    """遍历包目录计算指纹（失败返回空串）。"""
+    pkg = _package_dir(dist_name)
+    if not pkg or not os.path.isdir(pkg):
+        return ""
+
+    entries: list[tuple[str, int, int]] = []
+    try:
+        for root, dirs, files in os.walk(pkg):
+            dirs.sort()
+            for name in sorted(files):
+                full = os.path.join(root, name)
+                try:
+                    stat = os.stat(full)
+                except OSError:
+                    continue
+                rel = os.path.relpath(full, pkg).replace("\\", "/")
+                entries.append((rel, int(stat.st_size), int(stat.st_mtime_ns)))
+    except OSError:
+        return ""
+
+    if not entries:
+        return ""
+
+    entries.sort()
+    digest = hashlib.sha256()
+    for rel, size, mtime_ns in entries:
+        digest.update(f"{rel}\0{size}\0{mtime_ns}\n".encode())
+    return digest.hexdigest()
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -280,7 +374,9 @@ class OcrCache:
             :class:`infra.errors.OutputPathViolation`。
         engine_name: OCR 引擎名（参与命中判定）。
         engine_version: 引擎版本；``None`` 时自动探测（失败降级 ``"unknown"``）。
-        resize_long_side: 降采样长边（本批次固定 0=不降采样；参与命中判定）。
+        engine_fingerprint: 引擎**次级指纹**（包内文件摘要）；``None`` 时自动探测
+            （:func:`detect_engine_fingerprint`）。**读不到为空串 → 保守判 MISS**。
+        resize_long_side: 降采样长边（默认 0=不降采样；参与命中判定）。
         intra_op_num_threads: onnxruntime 单算子线程数（参与命中判定）。
         enabled: 是否启用（``False`` 时 :meth:`get`/:meth:`put` 直接短路）。
     """
@@ -292,6 +388,7 @@ class OcrCache:
         allowed_root: str | os.PathLike[str] | None = None,
         engine_name: str = "rapidocr",
         engine_version: str | None = None,
+        engine_fingerprint: str | None = None,
         resize_long_side: int = 0,
         intra_op_num_threads: int = 2,
         enabled: bool = True,
@@ -304,6 +401,11 @@ class OcrCache:
         self.engine_name: str = str(engine_name or "rapidocr")
         self.engine_version: str = (
             str(engine_version) if engine_version is not None else detect_engine_version()
+        )
+        self.engine_fingerprint: str = (
+            str(engine_fingerprint)
+            if engine_fingerprint is not None
+            else detect_engine_fingerprint()
         )
         self.resize_long_side: int = int(resize_long_side)
         self.intra_op_num_threads: int = int(intra_op_num_threads)
@@ -323,9 +425,13 @@ class OcrCache:
         }
 
     def identity(self) -> dict[str, Any]:
-        """返回缓存身份（引擎名/版本 + 参数指纹），供日志与追溯。"""
+        """返回缓存身份（引擎名/版本/次级指纹 + 参数指纹），供日志与追溯。"""
         return {
-            "engine": {"name": self.engine_name, "version": self.engine_version},
+            "engine": {
+                "name": self.engine_name,
+                "version": self.engine_version,
+                "fingerprint": self.engine_fingerprint,
+            },
             "params_fingerprint": self.params_fingerprint(),
         }
 
@@ -414,6 +520,12 @@ class OcrCache:
             return "engine.name 不符"
         if engine.get("version") != self.engine_version:
             return "engine.version 不符"
+        # ── 次级指纹（P2 修复）：修补 version="unknown" 的命中漏洞 ──
+        #    保守红线：本机指纹读不到（空串）→ 一律 MISS，绝不让 unknown==unknown 命中。
+        if not self.engine_fingerprint:
+            return "engine_fingerprint 不可读（保守 MISS）"
+        if payload.get("engine_fingerprint") != self.engine_fingerprint:
+            return "engine_fingerprint 不符"
         if payload.get("params_fingerprint") != self.params_fingerprint():
             return "params_fingerprint 不符"
         return None
@@ -546,6 +658,7 @@ class OcrCache:
             "image_size": [int(size[0]), int(size[1])],
             "image_path_hint": str(image_path_hint or ""),
             "engine": {"name": self.engine_name, "version": self.engine_version},
+            "engine_fingerprint": self.engine_fingerprint,
             "params_fingerprint": self.params_fingerprint(),
             "created_at": _now_local_iso(),
             "lines": lines,
