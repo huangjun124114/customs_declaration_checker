@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 #  报关申报要素自动校验工具 · 一键打包脚本（Windows PowerShell）
 #
 #  用法：
@@ -38,6 +38,11 @@ $ZipName = "报关申报要素校验工具_v${Version}_0916.zip"
 $env:PYTHONUTF8 = "1"
 $env:PYTHONIOENCODING = "utf-8"
 $env:PYTHONLEGACYWINDOWSSTDIO = "0"
+# ⚠️ 配套（SOP 陷阱 #5 的反面）：本脚本强制子进程输出 UTF-8，而 Windows
+#    PowerShell 5.1 默认用 GBK 控制台编码解读「原生进程 stdout」→ check_env /
+#    PyInstaller 的中文日志会变成乱码（实测打包日志第一步整段乱码）。
+#    把控制台输出编码设为 UTF-8，与子进程对齐。
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 
 # 脚本所在目录 = 工程根
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -62,8 +67,15 @@ Write-Host "[INFO] 使用解释器：$Python"
 if (-not $SkipEnvCheck) {
     Write-Host ""
     Write-Host "[STEP 1] 环境体检（tools/check_env.py）..." -ForegroundColor Yellow
+    # ⚠️ PS 5.1 陷阱（实测打包失败真因之一）：原生 exe 往 stderr 写日志时，
+    #    在 $ErrorActionPreference='Stop' 下会被当作致命 NativeCommandError 并中止
+    #    整个脚本。体检脚本 / PyInstaller 的日志都会写 stderr，故原生调用期间临时
+    #    降为 'Continue'，退出码一律由 $LASTEXITCODE 显式判读。
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     & $Python "tools/check_env.py"
     $envExit = $LASTEXITCODE
+    $ErrorActionPreference = $prevEAP
 
     if ($envExit -eq 1) {
         Write-Host ""
@@ -131,11 +143,17 @@ if ($Onefile) {
     }
 }
 
+# ⚠️ 同 STEP 1 的 PS 5.1 stderr 陷阱：PyInstaller 的 INFO/进度日志写 stderr，
+#    在 'Stop' 偏好下会中止脚本 → 原生调用期间降为 'Continue'。
+$prevEAP = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
 & $Python -m PyInstaller @pyiArgs
-if ($LASTEXITCODE -ne 0) {
+$pyiExit = $LASTEXITCODE
+$ErrorActionPreference = $prevEAP
+if ($pyiExit -ne 0) {
     Write-Host ""
-    Write-Host "[FAIL] PyInstaller 打包失败（exit $LASTEXITCODE）。" -ForegroundColor Red
-    exit $LASTEXITCODE
+    Write-Host "[FAIL] PyInstaller 打包失败（exit $pyiExit）。" -ForegroundColor Red
+    exit $pyiExit
 }
 
 # ── 5. 结果核对 ────────────────────────────────────────────────────
