@@ -296,3 +296,28 @@ PyInstaller 只按「静态可解析的 import」收集模块，而 `six` 在任
 | 版本号 | `main.APP_VERSION` / `pyproject.toml` / `build_exe.ps1` 统一为 **0.3.0** |
 
 > ⚠️ 仍**未做**：干净 Win10 1809+ 真机**双击验收**（需现场机器，沿用 v0.2.0 遗留项）。
+
+### 批次 3：提交与推送（T15）
+
+| 项 | 结果 |
+|---|---|
+| 已推送提交 | `dfe00d5` → **`4ad328b`**（`main`） |
+| 提交规模 | **26 文件 / +5125 −570** |
+| 新增文件 | `core/token_matcher.py`／`ui/widgets/ocr_text_dialog.py`／`tools/run_sample.py`／`tools/eval_v03.py`／`tests/test_token_matcher.py`／`docs/10`／`docs/11`／`docs/12` |
+| 远端校验 | `git ls-remote` 远端 `main` = `4ad328b9d1730f0e7c70bf8a5ef0e364241bcf6d`，与本地 HEAD **逐字符相同** |
+| 双向差异 | `rev-list --left-right --count origin/main...HEAD` → **`0 0`** |
+| 忽略规则 | 新增 `build_log_*.txt` / `run_log_*.txt`（构建临时日志不入库，**未删除磁盘文件**） |
+| 未入库（按设计） | `dist/`（含 v0.2.0 与 v0.3.0 分发包）、`原始输入/`、运行期 `报关申报要素校验/` |
+
+### v0.3.0 遗留（转 v0.4 候选）
+
+| # | 事项 | 状态 |
+|---|---|---|
+| 1 | 干净 Win10 1809+ 真机双击验收 | **未闭环**（唯一未闭环交付验收项，需现场） |
+| 2 | 「整机品牌 → ❌」与「命中即合格」交叉场景（真实样本 idx1） | **待裁决** |
+| 3 | 散行卡/链路表 深色→浅色、工作台默认列全部记录 | **待用户确认**（属交互/视觉变更） |
+| 4 | KV 反哺判定（`Brand:XXX` 能解析却仍判 ⚠️） | **待裁决** |
+| 5 | `intra_op_num_threads` 移出 `params_fingerprint`（不影响 OCR 输出却致全量缓存失效） | 建议 |
+| 6 | 票号推断与 Excel 出货通知书号交叉校验 | 建议 |
+| 7 | `投票来源图号` UI 近似推断已删除，引擎回吐已就位 | **已闭环** ✓ |
+
