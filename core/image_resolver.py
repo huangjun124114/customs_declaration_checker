@@ -44,6 +44,8 @@ from infra.logger import Phase, get_logger
 __all__ = [
     "IMAGE_SUFFIXES",
     "ImageResolver",
+    "candidate_dir_names",
+    "match_segments",
     "parse_image_file_name",
     "strip_part_dir_suffix",
 ]
@@ -126,6 +128,57 @@ def parse_image_file_name(file_name: str) -> tuple[str, str, int] | None:
     return None
 
 
+def candidate_dir_names(part: str, order: str) -> list[str]:
+    """生成「料号目录」候选名（去重保序）。
+
+    内部语义映射（P4）：目录名 ≈ ``order``（订单号）；``part`` 作为次选兜底。
+
+    Args:
+        part: 料号。
+        order: 订单号。
+
+    Returns:
+        候选目录名列表。
+    """
+    names: list[str] = []
+    for raw in (order, part):
+        token = (raw or "").strip()
+        if token and token not in names:
+            names.append(token)
+    return names
+
+
+def match_segments(
+    file_order: str,
+    file_part: str,
+    order: str,
+    part: str,
+) -> bool:
+    """判定文件名 ``A``/``B`` 段是否匹配记录。
+
+    **二次筛选铁律**：只要记录提供了 ``order``，则 ``A`` 段必须等于 ``order``
+    （避免同料号跨订单串货）；``part`` 提供时 ``B`` 段必须等于 ``part``。
+
+    Args:
+        file_order: 文件名首段（订单号）。
+        file_part: 文件名第二段（料号）。
+        order: 记录订单号。
+        part: 记录料号。
+
+    Returns:
+        ``True`` 表示匹配。
+    """
+    want_order = (order or "").strip().upper()
+    want_part = (part or "").strip().upper()
+
+    if want_order and file_order.strip().upper() != want_order:
+        return False
+    if want_part and file_part.strip().upper() != want_part:
+        return False
+    # 两者都为空 → 无有效筛选条件，视为不匹配（避免误收全票）
+    return bool(want_order or want_part)
+
+
 class ImageResolver:
     """三级索引图片解析器（架构设计第 4 节 ``ImageResolver``）。
 
@@ -141,9 +194,14 @@ class ImageResolver:
         ocr_engine: object | None = None,
         *,
         unreachable_probe: object | None = None,
+        index_enabled: bool = True,
     ) -> None:
         self._ocr_engine = ocr_engine
         self._unreachable_probe = unreachable_probe
+        self._index_enabled = bool(index_enabled)
+        self._index: object | None = None
+        self._index_base: Path | None = None
+        self.fallback_notes: list[str] = []
         self._log = get_logger(Phase.PHASE3)
 
     # ══════════════════════════════════════════════════════════
@@ -187,7 +245,59 @@ class ImageResolver:
             self._log.info(f"票号目录不存在：{base}（共享根可达，判缺图）")
             return [self._not_found_evidence(base, part)]
 
-        # ── 四级降级链 ──
+        # ── 四级降级链（v0.2.0 点 7：优先走**单次扫描**的内存倒排索引）──
+        #    ⚠️ 索引仅"省去重复扫描"，命中集合与实时链**逐条等价**（由
+        #    tests/test_image_index.py 断言）；索引不可用时**回退**实时四级链。
+        if self._index_enabled:
+            index = self._try_index(base)
+            if index is not None:
+                evidences = index.resolve(part, order)
+                if evidences is not None:
+                    if not evidences:
+                        self._log.info(
+                            f"未匹配到图片（索引）：票号={ticket or '-'} "
+                            f"料号={part or '-'} 订单={order or '-'}"
+                        )
+                    return evidences
+            self._note_fallback("图片倒排索引不可用，已回退四级降级链实时扫描")
+
+        return self._live_chain(base, part, order)
+
+    # ══════════════════════════════════════════════════════════
+    #  倒排索引快路径（点 7）
+    # ══════════════════════════════════════════════════════════
+
+    def _try_index(self, base: Path) -> object | None:
+        """惰性构建 / 复用 ``{票号}`` 目录的内存倒排索引。
+
+        Returns:
+            :class:`core.image_index.ImageIndex`（已构建）；构建失败或不可用返回 ``None``。
+        """
+        if self._index is not None and self._index_base == base:
+            return self._index
+
+        # 函数内 import：``core.image_index`` 反向依赖本模块的公共 helper，
+        # 模块级 import 会构成循环。
+        from core.image_index import ImageIndex
+
+        try:
+            index = ImageIndex(base)
+        except Exception as exc:  # noqa: BLE001 - 索引构建失败须回退，不得中断
+            self._log.warning(f"图片倒排索引构建异常（回退实时链）：{base} —— {exc}")
+            return None
+        if not index.built:
+            return None
+        self._index = index
+        self._index_base = base
+        return index
+
+    def _note_fallback(self, message: str) -> None:
+        """记录一次「回退实时链」事件（供上层写入 notes）。"""
+        self.fallback_notes.append(message)
+        self._log.warning(message)
+
+    def _live_chain(self, base: Path, part: str, order: str) -> list[ImageEvidence]:
+        """四级降级链（实时扫描；索引不可用时的**回退**路径，语义与旧实现一致）。"""
         evidences = self._level1_exact_part_dir(base, part, order)
         if evidences:
             return evidences
@@ -204,7 +314,9 @@ class ImageResolver:
         if evidences:
             return evidences
 
-        self._log.info(f"未匹配到图片：票号={ticket or '-'} 料号={part or '-'} 订单={order or '-'}")
+        self._log.info(
+            f"未匹配到图片：票号={base.name or '-'} 料号={part or '-'} 订单={order or '-'}"
+        )
         return []
 
     # ══════════════════════════════════════════════════════════
@@ -545,8 +657,7 @@ class ImageResolver:
     ) -> bool:
         """判定文件名 ``A``/``B`` 段是否匹配记录。
 
-        **二次筛选铁律**：只要记录提供了 ``order``，则 ``A`` 段必须等于 ``order``
-        （避免同料号跨订单串货）；``part`` 提供时 ``B`` 段必须等于 ``part``。
+        委托模块级 :func:`match_segments`（与倒排索引共用同一实现，防漂移）。
 
         Args:
             file_order: 文件名首段（订单号）。
@@ -557,15 +668,7 @@ class ImageResolver:
         Returns:
             ``True`` 表示匹配。
         """
-        want_order = (order or "").strip().upper()
-        want_part = (part or "").strip().upper()
-
-        if want_order and file_order.strip().upper() != want_order:
-            return False
-        if want_part and file_part.strip().upper() != want_part:
-            return False
-        # 两者都为空 → 无有效筛选条件，视为不匹配（避免误收全票）
-        return bool(want_order or want_part)
+        return match_segments(file_order, file_part, order, part)
 
     def _make_evidence(self, path_str: str, seq: int) -> ImageEvidence:
         """构造一条图片证据（探测存在性与可达性）。

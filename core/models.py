@@ -211,6 +211,11 @@ class OcrText:
         boxes: 文本框列表（``[(x1,y1,x2,y2), ...]``）。
         seq: 图片序号。
         low_confidence: 是否低于阈值（低于则 NoiseGuard 优先判 SUSPICIOUS）。
+        line_scores: 逐行置信度（与 :meth:`lines` 对齐；部分后端的逐行分数）。
+            用于 OCR 磁盘缓存 ``lines[].score`` 的无损往返；**不参与判定**。
+        kv: 从本图 OCR 行提取的键值对（v0.2.0 点 8）。
+            ⚠️ **不参与判定**（Q4 已决）：判定仍走原跨图投票链路，
+            KV 的出口只有「详细 JSON 日志」与「复核工作台展示」两处。
     """
 
     image_path: str = ""
@@ -219,19 +224,26 @@ class OcrText:
     boxes: list[Any] = dc_field(default_factory=list)
     seq: int = 0
     low_confidence: bool = False
+    line_scores: list[float] = dc_field(default_factory=list)
+    kv: dict[str, str] = dc_field(default_factory=dict)
 
     def lines(self) -> list[str]:
         """按行拆分 ``text_raw``（去除空行，逐行 strip）。"""
         return [line.strip() for line in (self.text_raw or "").splitlines() if line.strip()]
 
     def to_dict(self) -> dict[str, Any]:
-        """序列化为字典（**完整原文只进 JSON 证据文件，不进日志**）。"""
+        """序列化为字典（**完整原文只进 JSON 证据文件，不进日志**）。
+
+        ``kv`` 随详细 JSON 落盘（v0.2.0 点 8）；``boxes`` / ``line_scores`` 体积大
+        且不参与判定，**不落**详细 JSON（``boxes`` 原有约定保持不变）。
+        """
         return {
             "image_path": self.image_path,
             "text_raw": self.text_raw,
             "confidence": self.confidence,
             "seq": self.seq,
             "low_confidence": self.low_confidence,
+            "kv": dict(self.kv or {}),
         }
 
 

@@ -36,7 +36,9 @@ from core.element_parser import ElementParser
 from core.excel_probe import ExcelProbe
 from core.image_resolver import ImageResolver
 from core.judge_engine import JudgeEngine
+from core.kv_extractor import KvExtractor
 from core.models import CheckResult, DeclarationRecord, ExcelProbeResult, Fingerprint, Verdict
+from core.ocr_cache import OcrCache
 from core.ocr_engine import OcrEngine
 from core.result_exporter import ResultExporter
 from core.resume_store import ResumeStore, build_resume_path, compute_excel_hash
@@ -136,7 +138,10 @@ class CheckPipeline:
         resolver: 图片解析器（缺省 :class:`core.image_resolver.ImageResolver`）。
         ocr_engine: OCR 编排器（缺省惰性构造；可注入 mock 后端）。
         judge_engine: 判定引擎（缺省用 ``rule_repository`` 构造）。
+        kv_extractor: KV 提取器（缺省用 ``rule_repository`` 构造；v0.2.0 点 8，
+            **只归档/展示，不参与判定**）。
         exporter: 三产物导出器（缺省 ``None``，在 :meth:`run` 时按目录构造）。
+        enable_disk_cache: 是否启用 L2 OCR 磁盘缓存（v0.2.0 点 5；落 ``logs/ocr_cache/``）。
         batch_size: 常规批大小（缺省 6）。
         batch_size_heavy: 图片多时批大小（缺省 3）。
         heavy_image_threshold: 单条图片数超过该值降批（缺省 8）。
@@ -154,7 +159,9 @@ class CheckPipeline:
         resolver: ImageResolver | None = None,
         ocr_engine: OcrEngine | None = None,
         judge_engine: JudgeEngine | None = None,
+        kv_extractor: KvExtractor | None = None,
         exporter: ResultExporter | None = None,
+        enable_disk_cache: bool = True,
         batch_size: int = 6,
         batch_size_heavy: int = 3,
         heavy_image_threshold: int = 8,
@@ -174,7 +181,10 @@ class CheckPipeline:
         self._resolver = resolver if resolver is not None else ImageResolver()
         self._ocr = ocr_engine if ocr_engine is not None else OcrEngine()
         self._judge = judge_engine if judge_engine is not None else JudgeEngine(self._repo)
+        self._kv = kv_extractor if kv_extractor is not None else KvExtractor(self._repo)
         self._exporter = exporter
+        self._enable_disk_cache = bool(enable_disk_cache)
+        self._ocr_cache: OcrCache | None = None
 
         self._batch_size = max(1, int(batch_size))
         self._batch_size_heavy = max(1, int(batch_size_heavy))
@@ -269,6 +279,25 @@ class CheckPipeline:
         )
 
         # ══ Phase3：分批 OCR + 判定（逐条落盘）══
+        # ── L2 OCR 磁盘缓存接线（v0.2.0 点 5；落 {process_dir}/ocr_cache/）──
+        self._ocr_cache = None
+        if self._enable_disk_cache:
+            try:
+                self._ocr_cache = OcrCache(
+                    process_path,
+                    allowed_root=(
+                        allowed_process_root if allowed_process_root is not None else process_path
+                    ),
+                )
+                attach = getattr(self._ocr, "attach_disk_cache", None)
+                if callable(attach):
+                    attach(self._ocr_cache)
+                else:
+                    self._ocr_cache = None
+            except Exception as exc:  # noqa: BLE001 - 缓存接线失败不得中断跑批
+                self._log.warning(f"挂载 OCR 磁盘缓存失败（已忽略，仅用内存缓存）：{exc}")
+                self._ocr_cache = None
+
         counts = {v.value: 0 for v in ALL_VERDICTS}
         unreachable_streak = 0
         pause_key = ""
@@ -417,6 +446,22 @@ class CheckPipeline:
                 )
             )
 
+        # ══ 缓存统计（v0.2.0 点 5：命中 N / 实际识别 M）══
+        if self._ocr_cache is not None:
+            s = self._ocr_cache.stats()
+            emit(
+                PipelineProgress(
+                    phase="ocr",
+                    current=index,
+                    total=total,
+                    counts=dict(counts),
+                    message=(
+                        f"OCR 缓存命中 {s['hits']} / 实际识别 {s['misses']}"
+                        f"（写入 {s['writes']}，损坏 {s['corrupt']}）"
+                    ),
+                )
+            )
+
         # ══ 落盘（中止路径也要 flush，已完成结果绝不丢）══
         _safe_flush(store, self._log)
 
@@ -521,6 +566,18 @@ class CheckPipeline:
                 if ev.image_path in by_path:
                     ev.ocr = by_path[ev.image_path]
                     ev.ocr_confidence = float(by_path[ev.image_path].confidence or 0.0)
+
+        # ── v0.2.0 点 8：KV 提取（**只归档/展示，绝不进判定**）──
+        if self._kv is not None:
+            for ev in record.evidences:
+                if ev.ocr is None:
+                    continue
+                try:
+                    kv, _residue = self._kv.extract_from_ocr(ev.ocr)
+                    ev.ocr.kv = kv
+                except Exception as exc:  # noqa: BLE001 - KV 失败不影响判定
+                    self._log.debug(f"KV 提取失败（已忽略）：{exc}")
+
         return self._judge.judge(record)
 
     def _finalize(  # noqa: C901 - 收口逻辑，字段多
@@ -570,6 +627,9 @@ class CheckPipeline:
                         "aborted": aborted,
                         "paused": paused,
                         "excel_hash": fingerprint.excel_hash,
+                        "ocr_cache": (
+                            self._ocr_cache.stats() if self._ocr_cache is not None else None
+                        ),
                     },
                 )
                 output_paths = {k: str(v) for k, v in paths.items()}

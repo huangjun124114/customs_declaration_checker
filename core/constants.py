@@ -48,6 +48,11 @@ __all__ = [
     "SHEET_HEADER_HINTS",
     "TICKET_NO_PATTERN",
     "TICKET_TITLE_KEYWORDS",
+    "DEFAULT_KV_FIELD_ALIASES",
+    "DEFAULT_KV_SEPARATORS",
+    "DEFAULT_KV_WHITESPACE_SEPARATOR_MIN",
+    "DEFAULT_KV_NOISE_TERMS",
+    "DEFAULT_KV_ALLOW_NEXT_LINE_VALUE",
 ]
 
 
@@ -349,3 +354,65 @@ TICKET_NO_PATTERN: str = r"出货通知[书]?号\s*[:：]?\s*(?P<ticket>[A-Za-z]
 
 #: 标题行关键词（用于区分「标题行」与「表头列名行」，SOP Phase 1）
 TICKET_TITLE_KEYWORDS: list[str] = ["出货通知书号", "出货通知号"]
+
+
+# ══════════════════════════════════════════════════════════════════
+#  五、OCR 键值对（KV）提取默认值（v0.2.0 点 8）
+# ══════════════════════════════════════════════════════════════════
+#  ⚠️ 权威载体为 ``rules/ocr_kv_patterns.yaml``；本组常量仅作 **YAML 缺失时的兜底**。
+#     由 tests/test_rule_repository.py 与 tests/test_kv_extractor.py 断言二者**等价**
+#     （防"打包漏 YAML → 静默失效"，即历史缺陷 F 的教训）。
+#
+#  ⚠️ KV **不参与判定**（Q4 已决）：判定仍走原跨图投票链路。
+
+#: KV 字段别名表（规范字段名 → 该字段在唛头/标签上可能出现的别名形态）。
+#: 顺序与 ``rules/ocr_kv_patterns.yaml`` 的 ``field_aliases`` **逐项一致**。
+DEFAULT_KV_FIELD_ALIASES: list[tuple[str, list[str]]] = [
+    ("Brand", ["Brand", "BRAND", "品牌", "牌"]),
+    ("Model", ["Model", "MODEL", "型号", "规格型号", "产品型号", "制造商型号"]),
+    ("MFR P/N", ["MFR P/N", "MFR PIN", "MFR/PN", "制造商料号", "制造商 P/N"]),
+    (
+        "P/N",
+        [
+            "P/N",
+            "P/H",
+            "PIN",
+            "料号",
+            "物料编号",
+            "成品料号",
+            "创维物料编号",
+            "SKYWORTH P/N",
+            "SKYWORTH P/H",
+        ],
+    ),
+    ("Customer model", ["Customer model", "Customermodel", "客户型号"]),
+    ("Quantity", ["QTY", "数量", "订购数量"]),
+    ("Weight", ["重量", "毛重", "净重"]),
+    ("Origin", ["Origin", "原产地", "产地"]),
+    (
+        "Manufacturer",
+        ["Manufacturer", "Manufacturer Name", "制造商", "制造商全称", "生产厂商"],
+    ),
+    ("Supplier", ["Supplier", "Supplier Code", "Supplier Name", "供应商"]),
+    ("Description", ["Description", "DESCRIPTION", "品名", "名称", "中文品名"]),
+    ("Date", ["Date", "DATE", "日期", "生产日期"]),
+    ("Serial", ["Serial", "Serial No.", "Serial No", "序列号"]),
+]
+
+#: KV 键值分隔符（半角冒号 / 全角冒号 / 等号）
+DEFAULT_KV_SEPARATORS: list[str] = [":", "：", "="]
+
+#: 连续空白视为弱分隔符的最小空格数（键须命中别名白名单才采信）
+DEFAULT_KV_WHITESPACE_SEPARATOR_MIN: int = 2
+
+#: KV 级噪声词表（UI 图标文字 / 应用名；整行命中则判为噪声，不进 KV）
+DEFAULT_KV_NOISE_TERMS: list[str] = [
+    "prime video",
+    "YouTube",
+    "NETFLIX",
+    "Spotify",
+    "Prime Video",
+]
+
+#: 是否支持「值在下一行」（弱分隔，默认关闭，避免误吞相邻行）。
+DEFAULT_KV_ALLOW_NEXT_LINE_VALUE: bool = False

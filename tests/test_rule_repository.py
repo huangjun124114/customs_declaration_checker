@@ -31,8 +31,8 @@ class TestLoadAll:
     """6 份规则全部加载成功。"""
 
     def test_all_files_present(self, rules_dir: Path) -> None:
-        # 缺陷 C：新增 `non_brand_tokens.yaml` → 共 7 份规则文件。
-        assert len(RULE_FILES) == 7
+        # 缺陷 C：新增 `non_brand_tokens.yaml`；v0.2.0 批次 2：新增 `ocr_kv_patterns.yaml` → 共 8 份。
+        assert len(RULE_FILES) == 8
         for name in RULE_FILES:
             assert (rules_dir / name).is_file(), f"缺少规则文件 {name}"
 

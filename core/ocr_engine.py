@@ -34,9 +34,11 @@ import threading
 from collections import OrderedDict
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import replace as _dc_replace
 from typing import Any
 
 from core.models import OcrText
+from core.ocr_cache import OcrCache
 from infra.encoding import normalize_path
 from infra.logger import Phase, get_logger
 
@@ -82,6 +84,25 @@ def _compute_image_hash(image_path: str | os.PathLike[str]) -> str:
     except OSError:
         return ""
     return digest.hexdigest()
+
+
+def _with_path(ocr: OcrText, path_str: str) -> OcrText:
+    """返回把 ``image_path`` 改为 ``path_str`` 的副本（命中缓存时用）。
+
+    缓存按**图片内容哈希**键控，同一内容可能来自不同路径；命中后必须把路径改回
+    **本次请求路径**，否则上层 ``by_path`` 回填会失配。``image_path`` 相同时直接
+    返回原对象（零拷贝）。
+
+    Args:
+        ocr: 缓存中的 OCR 结果。
+        path_str: 本次请求路径。
+
+    Returns:
+        路径正确的 :class:`core.models.OcrText`。
+    """
+    if ocr.image_path == path_str:
+        return ocr
+    return _dc_replace(ocr, image_path=path_str)
 
 
 def _safe_sequence(value: Any) -> list[Any]:
@@ -304,6 +325,7 @@ class RapidOcrBackend(OcrBackend):
             confidence=confidence,
             boxes=boxes,
             seq=0,
+            line_scores=score_values,
         )
 
     def warmup(self) -> None:
@@ -377,7 +399,8 @@ class OcrEngine:
       * **批量并发**：``recognize_batch`` 用 ``ThreadPoolExecutor(max_workers≤2)``
         并行同条记录的多张图（R8：限制并发，防 CPU 线程爆炸）；
       * **单张失败不中断**：任一张抛异常 → 该张返回低置信占位并记 WARN（契约要求）；
-      * **哈希缓存**：命中缓存直接返回，避免重复 OCR（key = 图片内容 sha256）；
+      * **两级缓存**：L1 进程内 LRU（``_LruCache``）+ L2 磁盘缓存（``core.ocr_cache``）；
+        命中缓存直接返回，避免重复 OCR（key = 图片内容 sha256）；
       * **低置信度标注**：``confidence < threshold`` → ``low_confidence=True``。
 
     Args:
@@ -387,6 +410,8 @@ class OcrEngine:
         cache_enabled: 是否启用哈希缓存（默认 ``True``）。
         cache_max_entries: 缓存最大条目数。
         hash_fn: 图片哈希函数（**供测试注入**；默认内容 sha256）。
+        disk_cache: L2 磁盘缓存（``core.ocr_cache.OcrCache``）；``None`` 时仅用 L1，
+            可后续经 :meth:`attach_disk_cache` 挂载。
     """
 
     #: 并发上限（R8：``max_workers≤2``）
@@ -401,6 +426,7 @@ class OcrEngine:
         cache_enabled: bool = True,
         cache_max_entries: int = DEFAULT_CACHE_MAX_ENTRIES,
         hash_fn: Callable[[str | os.PathLike[str]], str] | None = None,
+        disk_cache: OcrCache | None = None,
     ) -> None:
         self._backend = backend
         self._max_workers = self._clamp_workers(max_workers)
@@ -408,6 +434,7 @@ class OcrEngine:
         self._cache_enabled = bool(cache_enabled)
         self._cache = _LruCache(cache_max_entries)
         self._hash_fn = hash_fn or _compute_image_hash
+        self._disk_cache = disk_cache
         self._log = get_logger(Phase.OCR)
 
     # ── 属性 ──────────────────────────────────────────────────
@@ -420,6 +447,19 @@ class OcrEngine:
         except (TypeError, ValueError):
             n = 1
         return max(1, min(cls.MAX_WORKERS_LIMIT, n))
+
+    def attach_disk_cache(self, cache: OcrCache | None) -> None:
+        """挂载 / 卸载 L2 磁盘缓存（由 ``CheckPipeline`` 在跑批前接线）。
+
+        Args:
+            cache: :class:`core.ocr_cache.OcrCache`；``None`` 表示卸载。
+        """
+        self._disk_cache = cache
+
+    @property
+    def disk_cache(self) -> OcrCache | None:
+        """返回当前 L2 磁盘缓存（未挂载为 ``None``）。"""
+        return self._disk_cache
 
     @property
     def backend(self) -> OcrBackend:
@@ -457,7 +497,10 @@ class OcrEngine:
     # ── 单张 ──────────────────────────────────────────────────
 
     def recognize_one(self, image_path: str | os.PathLike[str]) -> OcrText:
-        """识别单张（带缓存与容错，**永不抛异常**）。
+        """识别单张（带两级缓存与容错，**永不抛异常**）。
+
+        缓存查找顺序：**L1 进程内 LRU → L2 磁盘缓存 → 真实 OCR**；
+        真实识别成功后回写 L2（+ L1）。缓存 key = 图片内容 sha256。
 
         Args:
             image_path: 图片路径。
@@ -470,12 +513,25 @@ class OcrEngine:
         path_str = str(p)
 
         cache_key = self._cache_key(path_str)
+        content_keyed = bool(cache_key) and not cache_key.startswith("path:")
+
+        # ── L1：进程内 LRU ──
         if self._cache_enabled and cache_key:
             cached = self._cache.get(cache_key)
             if cached is not None:
-                self._log.debug(f"OCR 缓存命中：{p.name}")
-                return cached
+                self._log.debug(f"OCR L1 缓存命中：{p.name}")
+                return _with_path(cached, path_str)
 
+        # ── L2：磁盘缓存（仅对内容哈希 key 生效）──
+        if self._disk_cache is not None and content_keyed:
+            disk = self._disk_cache.get(cache_key, image_path_hint=path_str)
+            if disk is not None:
+                self._log.debug(f"OCR L2 缓存命中：{p.name}")
+                if self._cache_enabled:
+                    self._cache.put(cache_key, disk)
+                return disk
+
+        # ── 真实识别 ──
         try:
             result = self.backend.recognize(p)
         except Exception as exc:  # noqa: BLE001 - 单张失败不中断（契约要求）
@@ -492,6 +548,8 @@ class OcrEngine:
         annotated = self._finalize(result, path_str)
         if self._cache_enabled and cache_key:
             self._cache.put(cache_key, annotated)
+        if self._disk_cache is not None and content_keyed:
+            self._disk_cache.put(cache_key, annotated, image_path_hint=path_str)
         return annotated
 
     def _cache_key(self, path_str: str) -> str:

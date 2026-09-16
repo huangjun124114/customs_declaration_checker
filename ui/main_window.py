@@ -135,6 +135,11 @@ class MainWindow(QMainWindow):
         reload_action.setStatusTip("重新加载 rules/*.yaml 规则（下次跑批生效）")
         reload_action.triggered.connect(self._on_reload_rules)
         rules_menu.addAction(reload_action)
+        rules_menu.addSeparator()
+        clear_cache_action = QAction("清空 OCR 缓存(&C)", self)
+        clear_cache_action.setStatusTip("删除 logs/ocr_cache/ 下全部 OCR 结果缓存（v0.2.0 点 5）")
+        clear_cache_action.triggered.connect(self._on_clear_ocr_cache)
+        rules_menu.addAction(clear_cache_action)
 
         # 帮助菜单
         help_menu = menubar.addMenu("帮助(&H)")
@@ -583,6 +588,27 @@ class MainWindow(QMainWindow):
 
             self.log.error("规则重载失败：%s", exc)
             QMessageBox.critical(self, "重载规则失败", user_message_of(exc))
+
+    def _on_clear_ocr_cache(self) -> None:
+        """菜单「清空 OCR 缓存」：删除 ``logs/ocr_cache/`` 下全部缓存（v0.2.0 点 5）。"""
+        try:
+            from app.path_policy import PathPolicy
+            from core.ocr_cache import OcrCache
+
+            _result_dir, process_dir = PathPolicy().resolve_outputs()
+            cache = OcrCache(process_dir, allowed_root=process_dir)
+            removed = cache.clear()
+            self.log.info("OCR 缓存已清空：删除 %d 个文件（%s）", removed, cache.cache_dir)
+            QMessageBox.information(
+                self,
+                "清空 OCR 缓存",
+                f"已删除 {removed} 个缓存文件。\n{cache.cache_dir}",
+            )
+        except Exception as exc:  # noqa: BLE001 - UI 层需兜住一切，避免闪退
+            from infra.errors import user_message_of
+
+            self.log.error("清空 OCR 缓存失败：%s", exc)
+            QMessageBox.critical(self, "清空 OCR 缓存失败", user_message_of(exc))
 
     def _on_about(self) -> None:
         """菜单「关于」。"""

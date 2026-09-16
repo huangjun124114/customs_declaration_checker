@@ -31,11 +31,14 @@ __all__ = [
     "WholeMachineBrandRules",
     "SeparatorRules",
     "NoiseSignalRules",
+    "NonBrandTokenRules",
+    "OcrKvPatternRules",
     "RuleSet",
     "RuleRepository",
 ]
 
-#: 规则文件名清单（v1.1 C.2；缺陷 C 追加 ``non_brand_tokens.yaml``）
+#: 规则文件名清单（v1.1 C.2；缺陷 C 追加 ``non_brand_tokens.yaml``；
+#: v0.2.0 批次 2 追加 ``ocr_kv_patterns.yaml``，点 8 的 KV 规则外置载体）。
 RULE_FILES: tuple[str, ...] = (
     "fields_blacklist.yaml",
     "brand_patterns.yaml",
@@ -44,6 +47,7 @@ RULE_FILES: tuple[str, ...] = (
     "separators.yaml",
     "noise_signals.yaml",
     "non_brand_tokens.yaml",
+    "ocr_kv_patterns.yaml",
 )
 
 
@@ -120,6 +124,39 @@ class NonBrandTokenRules:
 
     tokens: tuple[str, ...] = ()
     source_path: str = ""
+
+
+@dataclass(frozen=True)
+class OcrKvPatternRules:
+    """``ocr_kv_patterns.yaml`` 快照（v0.2.0 点 8）。
+
+    KV（键值对）提取规则：字段别名表 / 分隔符集合 / 弱分隔阈值 / 噪声词表。
+    ⚠️ KV **不参与判定**；本快照仅供 :class:`core.kv_extractor.KvExtractor` 使用。
+
+    Attributes:
+        field_aliases: ``((规范字段名, (别名, ...)), ...)``；用于识别"是否字段键"。
+        separators: 键值分隔符（半角/全角冒号、等号等）。
+        whitespace_separator_min: 连续空白视为弱分隔的最小空格数。
+        noise_terms: KV 级噪声词（整行命中则判为噪声，不进 KV）。
+        allow_next_line_value: 是否支持「值在下一行」（默认 ``False``）。
+        source_path: 实际加载路径（追溯用）。
+    """
+
+    field_aliases: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    separators: tuple[str, ...] = ()
+    whitespace_separator_min: int = 2
+    noise_terms: tuple[str, ...] = ()
+    allow_next_line_value: bool = False
+    source_path: str = ""
+
+    def alias_index(self) -> dict[str, str]:
+        """返回 ``{归一化别名 → 规范字段名}`` 索引（每次调用返回新字典）。"""
+        index: dict[str, str] = {}
+        for name, aliases in self.field_aliases:
+            index.setdefault(name.strip().upper(), name)
+            for alias in aliases:
+                index.setdefault(alias.strip().upper(), name)
+        return index
 
 
 @dataclass(frozen=True)
@@ -236,6 +273,7 @@ class RuleSet:
     separators: SeparatorRules = field(default_factory=SeparatorRules)
     noise_signals: NoiseSignalRules = field(default_factory=NoiseSignalRules)
     non_brand_tokens: NonBrandTokenRules = field(default_factory=NonBrandTokenRules)
+    ocr_kv_patterns: OcrKvPatternRules = field(default_factory=OcrKvPatternRules)
 
     def sources(self) -> dict[str, str]:
         """返回 ``{规则名: 实际加载路径}``（供日志与追溯）。"""
@@ -247,6 +285,7 @@ class RuleSet:
             "separators": self.separators.source_path,
             "noise_signals": self.noise_signals.source_path,
             "non_brand_tokens": self.non_brand_tokens.source_path,
+            "ocr_kv_patterns": self.ocr_kv_patterns.source_path,
         }
 
 
@@ -322,6 +361,9 @@ class RuleRepository:
                 noise_signals=self._build_noise_signals(*loaded["noise_signals.yaml"]),
                 non_brand_tokens=self._build_non_brand_tokens(
                     *loaded["non_brand_tokens.yaml"]
+                ),
+                ocr_kv_patterns=self._build_ocr_kv_patterns(
+                    *loaded["ocr_kv_patterns.yaml"]
                 ),
             )
         except RuleConfigError:
@@ -624,6 +666,55 @@ class RuleRepository:
         """构造非品牌裸 token 规则快照（缺陷 C）。"""
         return NonBrandTokenRules(
             tokens=self._as_str_tuple(data.get("tokens")),
+            source_path=source,
+        )
+
+    def _build_ocr_kv_patterns(
+        self, data: dict[str, Any], source: str
+    ) -> OcrKvPatternRules:
+        """构造 OCR 键值对（KV）提取规则快照（v0.2.0 点 8）。
+
+        ``field_aliases`` 允许两种 YAML 形态：
+          * **映射**（推荐）：``{字段名: [别名, ...]}``；
+          * **列表**：``[{name: ..., aliases: [...]}, ...]``。
+
+        Raises:
+            RuleConfigError: ``field_aliases`` 结构非法（既非映射也非列表）。
+        """
+        raw_aliases = data.get("field_aliases")
+        aliases: list[tuple[str, tuple[str, ...]]] = []
+
+        if raw_aliases is None:
+            aliases = []
+        elif isinstance(raw_aliases, dict):
+            for name, tokens in raw_aliases.items():
+                aliases.append((str(name), self._as_str_tuple(tokens)))
+        elif isinstance(raw_aliases, (list, tuple)):
+            for idx, item in enumerate(raw_aliases):
+                if not isinstance(item, dict) or "name" not in item:
+                    raise RuleConfigError(
+                        f"field_aliases[{idx}] 缺少必填字段 name",
+                        path=source,
+                        field=f"field_aliases[{idx}]",
+                    )
+                name = str(item.get("name", ""))
+                aliases.append((name, self._as_str_tuple(item.get("aliases"))))
+        else:
+            raise RuleConfigError(
+                "ocr_kv_patterns.field_aliases 必须是映射或列表",
+                path=source,
+                field="field_aliases",
+            )
+
+        allow_next = data.get("allow_next_line_value")
+        return OcrKvPatternRules(
+            field_aliases=tuple(aliases),
+            separators=self._as_str_tuple(data.get("separators")),
+            whitespace_separator_min=self._as_int(
+                data.get("whitespace_separator_min"), 2
+            ),
+            noise_terms=self._as_str_tuple(data.get("noise_terms")),
+            allow_next_line_value=bool(allow_next) if allow_next is not None else False,
             source_path=source,
         )
 
