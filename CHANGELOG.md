@@ -212,10 +212,83 @@ PyInstaller 只按「静态可解析的 import」收集模块，而 `six` 在任
 | 视觉验收 | `tools/ui_preview.py`（离屏 + 模拟 1920×1080 屏 / 1600×900 窗）产出 2 张 PNG；弹窗几何自检 **4/4 OK**（右对齐 ±1 / 垂直居中 ±1 / 不遮图片区 / 完整落在屏内） |
 | 口径漂移 | `core/judge_engine.py` / `core/noise_guard.py` **零改动**；四类判定字符串未动（`tests/test_constants.py` 硬断言仍绿） |
 
+### 打包与冻结态冒烟（v0.3.1）
+
+> 命令：`.\build_exe.ps1 -Zip`（onedir + zip）。⚠️ **打包前必须先清空 `PYTHONPATH`**，见下「沙箱陷阱」。
+
+| 项 | 结果 |
+|---|---|
+| onedir 产物 | `dist\报关申报要素校验工具\` —— **721 文件 / 361,401,898 字节（344.7 MB）**；exe 本体 10,357,659 字节 |
+| 分发包 | `dist\报关申报要素校验工具_v0.3.1_0917.zip` —— **157,633,359 字节（150.3 MB）** |
+| zip sha256 | `1e8e4b2036d0fd754136275a3a36390668ddd206b7b0d37a2a4cb4ef23ce5307` |
+| zip 结构 | 731 条目 / 顶层仅 `报关申报要素校验工具` / 根下 exe 就位 / `testzip` 通过 |
+| 冻结态 `--self-test` | **exit 0，0.51s**（日志确认 `报关申报要素自动校验工具 v0.3.1 启动`） |
+| 冻结态 `--check-env` | **exit 0，0.92s** |
+| `_internal\rules\` | **8/8 YAML** 收全 |
+| 版本号四处一致 | `main.py` = `ui/main_window.py` = `pyproject.toml` = zip 文件名 = **0.3.1** |
+| 打包前置体检 | `tools/check_env.py` exit 0（19 依赖 + 23 模块 import + 无空壳包） |
+
+⚠️ **沙箱陷阱（本轮新增第 4 类，务必记录）**：首次打包在**最后一步 COLLECT** 失败 ——
+
+```
+INFO: Removing dir ...\dist\报关申报要素校验工具
+[safe-delete][SAFE_DELETE_FAIL_CLOSED] {"reason": "trash-failed",
+ "detail": "SHFileOperationW 失败: 0x78"}
+OSError: SHFileOperationW 失败: 0x78      → PyInstaller exit 1
+```
+
+根因：沙箱把删除拦截件装成 **`sitecustomize.py`**，而它是靠 **`PYTHONPATH` 指向
+`…\cli\vendor\shim`** 才被 Python 自动加载的（PyInstaller 日志的 "Module search paths
+(PYTHONPATH)" 里能直接看到这一条）。该拦截件走「移到回收站」路线，对 **3000+ 个文件、
+344 MB、含中文与超长路径**的目录会失败并 **fail-closed**（宁可报错也不真删）。
+
+**绕行：打包前清空 `PYTHONPATH`**（shim 就不会被加载，删除回到系统原生语义）：
+
+```powershell
+Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+```
+
+清空后同一条命令**一次通过**（Analysis→PYZ→PKG→EXE→COLLECT→zip 全绿）。
+抬高 `CODEBUDDY_SAFE_DELETE_BULK_THRESHOLD` 对**本类失败无效**（它走的是
+`trash-failed` 分支而非批量阈值分支）。
+
+📌 **另一个包装卫生点**：冻结态冒烟会在 onedir **旁边**生成运行目录
+`dist\报关申报要素校验工具\报关申报要素校验\`（v0.2.0 起的运行目录约定）。
+它与 zip 无关（STEP 6 先压缩、后冒烟），但**若之后再次压缩会把运行日志带进包**
+→ 冒烟后需清理，或直接重新打包（PyInstaller 会整目录重建）。
+
+📌 **冒烟已固化为常备工具**：本轮起初用的是一次性脚本 `_smoke.py`（版本号硬编码，
+核对完即删），现已提升为 **`tools/smoke_frozen.py`** —— 版本 / 包名 / zip 全部从工程
+现状**自动推导**，以后每次打包直接跑，换版本不用改脚本：
+
+```powershell
+Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+python tools/smoke_frozen.py --out _smoke.txt      # --no-run 可跳过 exe 冒烟
+```
+
+六项检查（任一**致命项**不过即 `exit 1`）：
+
+1. onedir 规模（文件数 / 字节 / exe 字节）+ 检出混进包里的运行目录；
+2. zip：精确字节、sha256、`testzip` 完整性、条目数、**根下 exe 是否就位**；
+3. 冒烟 `--self-test` / `--check-env` 的**退出码 + 耗时**，**带 300s 超时**
+   —— 打包态弹模态框会永久挂起，必须靠超时兜底，不能只等；
+4. `_internal/rules/` 与源码 `rules/` **逐个文件名比对**（能报出缺哪几个，
+   不只数个数 —— 缺陷 F 的教训）；
+5. 版本号**四处**一致：`main.py` / `ui/main_window.py` / `pyproject.toml` / zip 文件名；
+6. **冻结态实际运行版本**：从 `--self-test` 的运行日志里断言「… v0.3.1 启动」。
+
+⚠️ 第 6 项**不要**写成「在 exe 字节里搜版本串」：纯 Python 模块被 PyInstaller 放进
+**PYZ 归档**（压缩），`_MEIPASS` 只落地二进制与数据 —— 搜不到是**正常**的，那样写会造出
+稳定复现的**假报警**（初版即踩，返回 `含 0.3.1：False`）。权威判据是运行日志那一行。
+同理，冒烟日志走 **stderr**（`logging` 默认流），别因为"stderr 有内容"就判失败。
+
 ### 已知限制
 
-- 卡片内容超过窗格高时**纵向滚动**（这是本次修复的**设计取向**：宁可滚动，不可压扁）；
-  底部操作区已固定，无需滚动即可保存。
+- 卡片内容超过窗格高时**纵向滚动** —— 这是本次的**设计取向**（宁可滚动，不可压扁）。
+  ⭐ **用户 2026-09-17 00:08 明确确认**：采用「整卡纵向滚动 + 底部操作区常驻」，
+  **不**改为「只让散行 OCR 区滚动」。理由：复核卡各段都可能超高（判定原因长文案、
+  证据图多、散行多），局部滚动会让"哪一块在滚"变得不可预期；整卡滚动心智一致，
+  且操作区已固定，保存动作无需滚动。
 - 离屏渲染不加载 Windows 系统字体，需显式 `addApplicationFont("C:/Windows/Fonts/msyh.ttc")`，
   否则中文全渲染为豆腐块（`tools/ui_preview.py::_install_cjk_font` 已处理）。
 

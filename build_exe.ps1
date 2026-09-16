@@ -29,10 +29,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# 交付版本（与 main.APP_VERSION / pyproject.version 对齐）
-$Version = "0.3.0"
+# 交付版本（与 main.APP_VERSION / ui.main_window.APP_VERSION 对齐）
+$Version = "0.3.1"
 # 分发包名（v0.2.0 点 10）
-$ZipName = "报关申报要素校验工具_v${Version}_0916.zip"
+# ⚠️ 日期后缀 = **实际打包产出日**（本次 v0.3.1 的修复在 0916 深夜完成、包在 0917 产出）
+$ZipName = "报关申报要素校验工具_v${Version}_0917.zip"
 
 # ── 强制 UTF-8（SOP 陷阱 #5：官方打包器用 GBK 读文件）────────────────────
 $env:PYTHONUTF8 = "1"

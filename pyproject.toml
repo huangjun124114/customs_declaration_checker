@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "customs-declaration-checker"
 # 交付版本号（对外）。与《架构设计》文档版本（v1.2）属不同体系，勿混用。
-version = "0.3.0"
+version = "0.3.1"
 description = "报关申报要素自动校验桌面工具（品牌/型号 与 产品实拍标签交叉校验）"
 readme = "README.md"
 requires-python = ">=3.11"
