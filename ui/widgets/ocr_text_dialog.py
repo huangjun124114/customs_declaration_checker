@@ -1,8 +1,15 @@
-"""原始 OCR 文本弹窗（ui.widgets.ocr_text_dialog，v0.3.0 需求 8）。
+"""原文弹窗（ui.widgets.ocr_text_dialog）。
 
 **为什么要独立弹窗**：v0.2.0 的复核卡里同时存在「查看原始 OCR 全文」（可折叠区）与
 「当前图 OCR 文本」两个控件，**内容重复**。v0.3.0 只保留一个入口
 （按钮「查看原始 OCR 文本」），点击后用**弹窗**展示。
+
+本模块提供两个弹窗，**共用同一套定位逻辑**（:meth:`OcrTextDialog.place` /
+:meth:`OcrTextDialog.show_beside`）：
+
+  * :class:`OcrTextDialog` —— 「原始 OCR 文本」（**图级**：随当前图切换，带翻图导航）；
+  * :class:`DeclarationTextDialog` —— 「申报要素原文」（**记录级**：申报要素表整段原文，
+    与当前图无关，故隐藏翻图导航）。v0.3.3 新增，入口按钮「查看申报要素」。
 
 **关键约束**：① **不遮挡图片区域**；② 定位在**主窗口右侧、垂直居中**（**不置顶**）。
 实现要点：
@@ -12,8 +19,11 @@
     —— 重复点击只置顶，不叠加窗口；
   * **右区自适应**：以「图片区右边界 → 主窗口右边界」为合法右区，弹窗**按需收窄**
     后**右对齐**，并**垂直居中于主窗口**（见 :meth:`OcrTextDialog.show_beside`）；
-  * 提供 ``◀ 上一张`` / ``下一张 ▶``，可不关弹窗连续翻阅本记录所有图的 OCR；
+  * 提供 ``◀ 上一张`` / ``下一张 ▶``（**仅** OCR 弹窗），可不关弹窗连续翻阅本记录所有图的 OCR；
   * 提供「复制全文」。
+
+⚠️ **两个弹窗共用右区同一定位 → 会完全重叠**，故由调用方
+:class:`ui.widgets.workbench_card.WorkbenchCard` 保证**互斥**（开一个即关另一个）。
 
 ⚠️ **本文件是 UI 层**，可以 import PySide6；但不含任何判定逻辑。
 """
@@ -33,7 +43,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-__all__ = ["OcrTextDialog"]
+__all__ = ["DeclarationTextDialog", "OcrTextDialog"]
 
 #: 弹窗默认尺寸
 _DEFAULT_WIDTH = 560
@@ -56,6 +66,13 @@ class OcrTextDialog(QDialog):
         parent: Qt 父控件（用于取其所属顶层窗口做定位）。
     """
 
+    #: 窗口标题前缀（子类可覆盖；:meth:`set_content` 会拼成「前缀 — 内容标题」）
+    _WINDOW_TITLE = "原始 OCR 文本"
+    #: 底部提示语（子类可覆盖）
+    _HINT_TEXT = "提示：本窗口为非模态，可边看图边对照。"
+    #: 是否显示「上一张 / 下一张」（图级弹窗需要；记录级弹窗不需要）
+    _NAV_VISIBLE = True
+
     previous_requested = Signal()
     next_requested = Signal()
 
@@ -65,7 +82,7 @@ class OcrTextDialog(QDialog):
         # 非模态 + Tool：不阻塞主界面、不占任务栏
         self.setModal(False)
         self.setWindowFlag(Qt.WindowType.Tool, True)
-        self.setWindowTitle("原始 OCR 文本")
+        self.setWindowTitle(self._WINDOW_TITLE)
         self.resize(_DEFAULT_WIDTH, _DEFAULT_HEIGHT)
         self._build_ui()
 
@@ -86,8 +103,14 @@ class OcrTextDialog(QDialog):
         self.btn_next = QPushButton("下一张 ▶", self)
         self.btn_prev.clicked.connect(self.previous_requested.emit)
         self.btn_next.clicked.connect(self.next_requested.emit)
-        nav.addWidget(self.btn_prev)
-        nav.addWidget(self.btn_next)
+        if self._NAV_VISIBLE:
+            nav.addWidget(self.btn_prev)
+            nav.addWidget(self.btn_next)
+        else:
+            # ⚠️ 必须**显式 hide()**：仅"不加入布局"不足以让 isVisible() 为 False ——
+            # 父窗口 show() 时会连带显示从未被显式隐藏的子控件。
+            self.btn_prev.hide()
+            self.btn_next.hide()
         nav.addStretch(1)
         self.btn_copy = QPushButton("复制全文", self)
         self.btn_copy.clicked.connect(self._on_copy)
@@ -102,8 +125,9 @@ class OcrTextDialog(QDialog):
         self.text_view.setFont(font)
         outer.addWidget(self.text_view, 1)
 
-        self.hint_label = QLabel("提示：本窗口为非模态，可边看图边对照。", self)
+        self.hint_label = QLabel(self._HINT_TEXT, self)
         self.hint_label.setObjectName("reviewHint")
+        self.hint_label.setWordWrap(True)
         outer.addWidget(self.hint_label)
 
     # ─────────────────────── 内容 ───────────────────────
@@ -128,7 +152,15 @@ class OcrTextDialog(QDialog):
         self.text_view.setPlainText(text)
         self.btn_prev.setEnabled(bool(has_prev))
         self.btn_next.setEnabled(bool(has_next))
-        self.setWindowTitle(f"原始 OCR 文本 — {title}" if title else "原始 OCR 文本")
+        self.setWindowTitle(f"{self._WINDOW_TITLE} — {title}" if title else self._WINDOW_TITLE)
+
+    def set_hint(self, text: str) -> None:
+        """覆盖底部提示语（如附加「解析结果」供人工比对）。
+
+        Args:
+            text: 提示语；空串时回退到类默认 :attr:`_HINT_TEXT`。
+        """
+        self.hint_label.setText(text or self._HINT_TEXT)
 
     def current_text(self) -> str:
         """返回当前正文（供测试）。"""
@@ -283,3 +315,31 @@ class OcrTextDialog(QDialog):
         if clipboard is not None:
             clipboard.setText(self.text_view.toPlainText())
         self.hint_label.setText("已复制全文到剪贴板。")
+
+
+class DeclarationTextDialog(OcrTextDialog):
+    """「申报要素原文」**非模态**弹窗（v0.3.3 需求，单例由调用方持有）。
+
+    与 :class:`OcrTextDialog` **共用定位逻辑**（:meth:`OcrTextDialog.place` /
+    :meth:`OcrTextDialog.show_beside`）—— 右侧、垂直居中、**不遮挡图片区**。
+
+    差异（**只有三点，均不含判定逻辑**）：
+
+      * 标题前缀为「申报要素原文」（原为「原始 OCR 文本」）；
+      * **隐藏**「上一张 / 下一张」—— 申报要素是**记录级**原文，与当前图无关，
+        翻图导航在这里没有意义（保留「复制全文」，复核时要粘进群/邮件）；
+      * 提示语说明「展示的是申报要素表里的整段原文，未经解析清洗」，
+        避免复核人误以为看到的是**解析后**的品牌/型号。
+
+    ⚠️ **内容红线**：正文必须是 ``record.raw_element_text`` **原样**——
+    不做 strip / 清洗 / 截断 / 反解析（口径「原始输入只进不改」；判定契约规定
+    ``raw_element_text`` 保留原始形态，见 ``docs/04`` 裁决二）。解析结果只允许作为
+    **附加提示**经 :meth:`OcrTextDialog.set_hint` 展示，**不得**替换或改写正文。
+    """
+
+    _WINDOW_TITLE = "申报要素原文"
+    _HINT_TEXT = (
+        "提示：正文为申报要素表中的整段原文（未经解析清洗，原样展示）；"
+        "本窗口非模态，可边看图边对照。"
+    )
+    _NAV_VISIBLE = False

@@ -71,6 +71,10 @@ class BrandPatternRules:
 
     patterns: tuple[tuple[str, str, str], ...] = ()   # (name, regex, note)
     none_tokens: tuple[str, ...] = ()
+    #: 【口径 v0.3.2】图片侧「显式无标记」正则：``(name, field, regex, note)``。
+    #: 命中（且申报侧该要素为「无」）→ 该要素核验通过。⚠️ 缺省为空元组时，
+    #: 运行期回退 :data:`core.constants.DEFAULT_NONE_MARKERS`（兜底 ≡ repo，缺陷 F 教训）。
+    none_markers: tuple[tuple[str, str, str, str], ...] = ()
     source_path: str = ""
 
     def compiled(self) -> list[tuple[str, re.Pattern[str], str]]:
@@ -83,6 +87,21 @@ class BrandPatternRules:
         for name, regex, note in self.patterns:
             result.append((name, re.compile(regex), note))
         return result
+
+    def compiled_none_markers(self) -> list[tuple[str, str, re.Pattern[str], str]]:
+        """编译「显式无标记」正则（口径 v0.3.2）。
+
+        Returns:
+            ``[(name, field, compiled_pattern, note), ...]``；``none_markers`` 为空
+            时回退 :data:`core.constants.DEFAULT_NONE_MARKERS`（兜底 ≡ repo）。
+        """
+        from core import constants as _C
+
+        source = self.none_markers or tuple(_C.DEFAULT_NONE_MARKERS)
+        return [
+            (name, field, re.compile(regex, re.IGNORECASE), note)
+            for name, field, regex, note in source
+        ]
 
 
 @dataclass(frozen=True)
@@ -182,6 +201,12 @@ class NoiseSignalRules:
     low_confidence_threshold: float = 0.5
     fragment_min_chars: int = 2
     known_noise_samples: tuple[dict[str, str], ...] = ()
+    #: 【口径 v0.3.2】英文「只差字母」→ 待复核：最小长度（须 > 3 个字母）
+    letter_diff_min_length: int = 4
+    #: 同上的编辑距离上限（"只有字母之差"的量化阈值）
+    letter_diff_max_edit_distance: int = 2
+    #: 同上的判定（**强制 SUSPICIOUS**，绝不直达 ❌）
+    letter_diff_verdict: str = "SUSPICIOUS"
     source_path: str = ""
 
     def normalize_confusables(self, text: str) -> str:
@@ -430,6 +455,17 @@ class RuleRepository:
                     field=f"patterns.{name}",
                 ) from exc
 
+        # 校验「显式无标记」正则语法（口径 v0.3.2）
+        for name, marker_field, regex, _note in snapshot.brand_patterns.none_markers:
+            try:
+                re.compile(regex)
+            except re.error as exc:
+                raise RuleConfigError(
+                    f"显式无标记正则语法错误：{exc}",
+                    path=snapshot.brand_patterns.source_path,
+                    field=f"none_markers.{name}({marker_field})",
+                ) from exc
+
         # 校验型号锚定正则语法
         try:
             snapshot.model_clean_rules.compiled_anchor()
@@ -444,6 +480,13 @@ class RuleRepository:
             warnings.append(
                 "noise_signals.fuzzy_similarity.verdict 非 SUSPICIOUS —— "
                 "违反「不虚高」红线，疑似噪声必须降级为 ⚠️，禁止直达 ❌"
+            )
+
+        # 【口径 v0.3.2】英文「只差字母」同样必须降级 ⚠️（不虚高红线）
+        if snapshot.noise_signals.letter_diff_verdict != "SUSPICIOUS":
+            warnings.append(
+                "noise_signals.letter_only_difference.verdict 非 SUSPICIOUS —— "
+                "违反「不虚高」红线，疑似字母误读必须降级为 ⚠️，禁止直达 ❌"
             )
 
         return warnings
@@ -605,7 +648,8 @@ class RuleRepository:
         """构造品牌正则快照。
 
         Raises:
-            RuleConfigError: ``patterns`` 条目缺少 ``regex`` 字段。
+            RuleConfigError: ``patterns`` 条目缺少 ``regex`` 字段；或
+                ``none_markers`` 条目缺少 ``regex`` / ``field``。
         """
         raw_patterns = data.get("patterns") or []
         if not isinstance(raw_patterns, (list, tuple)):
@@ -631,8 +675,59 @@ class RuleRepository:
         return BrandPatternRules(
             patterns=tuple(patterns),
             none_tokens=self._as_str_tuple(data.get("none_tokens")),
+            none_markers=self._build_none_markers(data.get("none_markers"), source),
             source_path=source,
         )
+
+    def _build_none_markers(
+        self, raw: Any, source: str
+    ) -> tuple[tuple[str, str, str, str], ...]:
+        """构造「显式无标记」快照（口径 v0.3.2）。
+
+        Args:
+            raw: YAML ``none_markers`` 节点（列表，每项含 ``name`` / ``field`` / ``regex``）。
+            source: 规则文件路径（错误信息用）。
+
+        Returns:
+            ``((name, field, regex, note), ...)``；节点缺失/为 ``None`` 时返回空元组
+            （运行期由 :meth:`BrandPatternRules.compiled_none_markers` 回退兜底常量）。
+
+        Raises:
+            RuleConfigError: 节点不是列表，或条目缺必填字段。
+        """
+        if raw is None:
+            return ()
+        if not isinstance(raw, (list, tuple)):
+            raise RuleConfigError(
+                "brand_patterns.none_markers 必须是列表",
+                path=source,
+                field="none_markers",
+            )
+
+        markers: list[tuple[str, str, str, str]] = []
+        for idx, item in enumerate(raw):
+            if not isinstance(item, dict) or "regex" not in item:
+                raise RuleConfigError(
+                    f"none_markers[{idx}] 缺少必填字段 regex",
+                    path=source,
+                    field=f"none_markers[{idx}].regex",
+                )
+            field = str(item.get("field", "") or "").strip()
+            if not field:
+                raise RuleConfigError(
+                    f"none_markers[{idx}] 缺少必填字段 field（品牌 / 型号）",
+                    path=source,
+                    field=f"none_markers[{idx}].field",
+                )
+            markers.append(
+                (
+                    str(item.get("name", f"none_marker_{idx}")),
+                    field,
+                    str(item.get("regex", "")),
+                    str(item.get("note", "")),
+                )
+            )
+        return tuple(markers)
 
     def _build_model_clean(self, data: dict[str, Any], source: str) -> ModelCleanRules:
         """构造型号清洗规则快照。"""
@@ -767,6 +862,15 @@ class RuleRepository:
                 if isinstance(item, dict):
                     samples.append({str(k): str(v) for k, v in item.items()})
 
+        # 【口径 v0.3.2】英文「只差字母」→ 待复核
+        letter_diff = data.get("letter_only_difference") or {}
+        if not isinstance(letter_diff, dict):
+            raise RuleConfigError(
+                "noise_signals.letter_only_difference 必须是字典",
+                path=source,
+                field="letter_only_difference",
+            )
+
         return NoiseSignalRules(
             confusable_chars=tuple(confusable),
             fuzzy_max_edit_distance=self._as_int(
@@ -779,5 +883,14 @@ class RuleRepository:
             ),
             fragment_min_chars=self._as_int(data.get("fragment_min_chars"), 2),
             known_noise_samples=tuple(samples),
+            letter_diff_min_length=self._as_int(
+                letter_diff.get("min_length"), 4
+            ),
+            letter_diff_max_edit_distance=self._as_int(
+                letter_diff.get("max_edit_distance"), 2
+            ),
+            letter_diff_verdict=str(
+                letter_diff.get("verdict", "SUSPICIOUS") or "SUSPICIOUS"
+            ),
             source_path=source,
         )

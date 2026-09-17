@@ -189,6 +189,11 @@ class TokenMatch:
         sample_line: 命中所在 OCR 原文行（截断 120 字，供 UI 展示与追溯）。
         corrected_from: ``FUZZY`` 时图内误读原文（``EXACT`` 为空串）。
         note: 人类可读说明（进判定说明 / 详细 JSON）。
+        none_marker: 【口径 v0.3.2】图片中命中到的**显式「无」标记**原文
+            （如 ``品牌:无`` / ``无型号``）；未命中为空串。
+            ⚠️ 命中标记时 ``mode`` **仍为** :data:`MATCH_NONE`（申报侧为"无"，
+            本就不参与分词匹配，"无标记"是另一路证据），判定依据见 ``note``。
+        none_marker_image: 显式「无」标记所在图片序号（0 表示未知）。
     """
 
     field: str = ""
@@ -199,6 +204,8 @@ class TokenMatch:
     sample_line: str = ""
     corrected_from: str = ""
     note: str = ""
+    none_marker: str = ""
+    none_marker_image: int = 0
 
     @property
     def hit(self) -> bool:
@@ -216,6 +223,8 @@ class TokenMatch:
             "sample_line": self.sample_line,
             "corrected_from": self.corrected_from,
             "note": self.note,
+            "none_marker": self.none_marker,
+            "none_marker_image": self.none_marker_image,
         }
 
 

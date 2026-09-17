@@ -41,6 +41,25 @@ SOP 1.3 四类判定口径与 SOP 3.4 比对 5 条，产出 :class:`core.models.
     的比对语义（``classify_detail`` 仍作为**未命中时的兜底三态**继续生效）；
   * **变更**：取证方式 —— 命中判定不再依赖"猜出图片侧字段值"，消除 OCR 无空间感知
     带来的 key-value 缺失误判。新基线须实测确立（见 ``docs/10_迭代方案_v0.3_0916.md``）。
+
+## ⚠️ 口径变更声明（v0.3.2，2026-09-17 用户拍板 · 需求 1/2）
+
+**新增一路"申报侧为无"的证据**：申报要素中「品牌」（或「型号」）为**无**、
+或申报要素原文里**根本没有该要素**（解析为空串）时，若**图片 OCR 中出现显式的
+「无品牌 / 无型号」标记**（如 ``品牌:无`` / ``无品牌`` 独立行 / ``型号：无型号``）
+→ 该要素**核验通过**（"双方均为『无』"的**一致证据**）。
+
+  * **优先级（用户裁定）**：显式「无」标记是**标签本体的直接证据**，其效力**高于**
+    同票图其他位置识别到的品牌/型号文字（唛头 ``SKYWORTH P/N``、外箱
+    ``Brand:Daewoo`` 等）—— 后者**仍写进「判定依据」留痕**，仅供人工追溯，
+    **不改变结论**（可追溯红线：结论可 ✅，证据链须完整）；
+  * **适用范围**：**仅**申报侧为无/缺失时生效。申报侧有值时，"图内标注无品牌"
+    仍是「申报有值但图内无该标识」→ ⚠️，**绝不**借标记判合格（防虚高）；
+  * **不变**：图片证据闸门（🔵）、整机品牌保留 ❌、两级分流、``SUSPICIOUS`` 降级护栏、
+    四类口径字符串、13 列汇总表结构、记录级跨文字体系兜底。
+
+**实现位置**：标记识别在 :mod:`core.none_marker`（规则外置 ``brand_patterns.yaml``
+的 ``none_markers``）；判定落点在 :meth:`JudgeEngine._field_state_v03` 的 ① 分支。
 """
 
 from __future__ import annotations
@@ -59,6 +78,7 @@ from core.models import (
     Verdict,
 )
 from core.noise_guard import NoiseGuard, is_none_token
+from core.none_marker import NoneMarkerHit, detect_none_markers
 from core.rule_repository import RuleRepository
 from core.token_matcher import TokenMatch, TokenMatcher
 from infra.logger import Phase, get_logger
@@ -670,6 +690,44 @@ class JudgeEngine:
         """当前使用的噪声护栏（供上层/测试读取）。"""
         return self._guard
 
+    @staticmethod
+    def _annotate_none_marker(
+        match: TokenMatch,
+        declared: str,
+        marker: NoneMarkerHit | None,
+    ) -> TokenMatch:
+        """把「图片显式无标记」写进 :class:`core.token_matcher.TokenMatch`。
+
+        供 UI「判定链路」列与详细 JSON 展示**可追溯的取证说明**：命中标记时
+        ``mode`` **保持** ``NONE``（申报侧为"无"，本就不参与分词匹配 —— 这是诚实
+        的取证描述），"无标记"是**另一路证据**，写进 ``none_marker`` 与 ``note``。
+
+        ⚠️ **只在申报侧为「无」/空时改写**：申报侧有值时，"图内标注无品牌"是
+        「申报有值但图内无该标识」（⚠️），**不是**"双方均无"，不得借标记判合格。
+
+        Args:
+            match: 原分词匹配结果。
+            declared: 申报值。
+            marker: 该字段命中的显式无标记（``None`` 表示未命中）。
+
+        Returns:
+            改写后的 :class:`TokenMatch`（原地修改并返回，便于链式调用）。
+        """
+        if match is None or marker is None:
+            return match
+        if not is_none_token(declared):
+            return match
+        shown = ("" if declared is None else str(declared)).strip() or "无"
+        match.none_marker = marker.marker
+        match.none_marker_image = marker.image
+        match.sample_line = marker.line
+        match.images = [marker.image] if marker.image > 0 else []
+        match.note = (
+            f"{marker.field}：申报为『{shown}』（无 / 未申报该要素），"
+            f"{marker.description}，双方均为『无』，判合格"
+        )
+        return match
+
     def _is_whole_machine_any_image(
         self,
         texts: list[OcrText],
@@ -762,6 +820,23 @@ class JudgeEngine:
         matcher = TokenMatcher(texts, rules=self._repo)
         brand_match = matcher.match(declared_brand, field=_FIELD_BRAND)
         model_match = matcher.match(declared_model, field=_FIELD_MODEL)
+
+        # ★ v0.3.2 口径（用户裁定 2026-09-17）：图片侧「显式无标记」。
+        #   * 语义：申报侧该要素为「无」/缺失 ＋ 图内显式标注「无品牌 / 无型号」
+        #     → 双方构成"均为无"的**一致证据** → 该要素核验通过；
+        #   * 优先级：显式「无」标记是**标签本体证据**，高于同票图其他位置识别到的
+        #     品牌/型号文字（唛头 ``SKYWORTH P/N``、外箱 ``Brand:Daewoo``）——
+        #     后者仍写进「判定依据」留痕，仅供人工追溯，**不改变结论**；
+        #   * ⚠️ 仅在申报侧为无/空时生效（申报有值时它是「图内无该标识」，不构成合格）。
+        none_markers = detect_none_markers(texts, rules=self._repo)
+        brand_marker = none_markers.get(_FIELD_BRAND)
+        model_marker = none_markers.get(_FIELD_MODEL)
+        brand_match = self._annotate_none_marker(
+            brand_match, declared_brand, brand_marker
+        )
+        model_match = self._annotate_none_marker(
+            model_match, declared_model, model_marker
+        )
         result.token_matches = [brand_match, model_match]
 
         # 整机上下文判定：**逐图**判定（缺陷 B 约束：检索范围限定在同一张图内）——
@@ -833,6 +908,8 @@ class JudgeEngine:
             model_verdict,
             brand_match=brand_match,
             model_match=model_match,
+            brand_marker=brand_marker,
+            model_marker=model_marker,
         )
 
         result.verdict = verdict
@@ -976,6 +1053,8 @@ class JudgeEngine:
         model_verdict: Any,
         brand_match: TokenMatch | None = None,
         model_match: TokenMatch | None = None,
+        brand_marker: NoneMarkerHit | None = None,
+        model_marker: NoneMarkerHit | None = None,
     ) -> tuple[Verdict, list[DifferenceDetail], NoiseLevel, str]:
         """按 SOP 1.3 / 3.4 生成四类判定 + 差异明细。
 
@@ -992,6 +1071,10 @@ class JudgeEngine:
         申报缺失但图片明确有                          → ❌ 校验异常
         ============================================  ==========================
 
+        **v0.3.2 增补（用户裁定 2026-09-17）**：申报侧为无/缺失 ＋ 图内显式标注
+        「无品牌 / 无型号」→ 合格（"均为无"的一致证据，优先级见
+        :meth:`JudgeEngine._annotate_none_marker`）。
+
         整条记录取"最严重"者：❌ > ⚠️ > ✅。
 
         Args:
@@ -1003,6 +1086,8 @@ class JudgeEngine:
             model_verdict: 型号字段的 :class:`core.noise_guard.NoiseVerdict`。
             brand_match: 品牌完整分词匹配结果（v0.3.0 主取证）。
             model_match: 型号完整分词匹配结果。
+            brand_marker: 品牌命中的图片侧「显式无标记」（v0.3.2）。
+            model_marker: 型号命中的图片侧「显式无标记」（v0.3.2）。
 
         Returns:
             ``(verdict, differences, noise_level, reason)``。
@@ -1011,10 +1096,10 @@ class JudgeEngine:
         reasons: list[str] = []
 
         brand_state = self._field_state_v03(
-            declared_brand, detected_brand, brand_verdict, brand_match
+            declared_brand, detected_brand, brand_verdict, brand_match, brand_marker
         )
         model_state = self._field_state_v03(
-            declared_model, detected_model, model_verdict, model_match
+            declared_model, detected_model, model_verdict, model_match, model_marker
         )
 
         # ── 差异明细（不一致 / 缺失时写；型号必须带逐字符差异）──
@@ -1056,6 +1141,36 @@ class JudgeEngine:
                 )
             )
 
+        # ── 【口径 v0.3.2】显式「无」标记留痕 ──
+        # ⚠️ 只**留痕**、**不改结论**：显式「无」标记是标签本体证据，优先级高于同票图
+        #    其他位置识别到的品牌/型号文字（唛头 ``SKYWORTH P/N``、外箱 ``Brand:Daewoo``）。
+        #    写进 differences 即进「判定依据」列，供人工追溯
+        #    （可追溯红线：结论可以是 ✅，但证据链必须完整）。
+        for declared, detected, marker, state in (
+            (declared_brand, detected_brand, brand_marker, brand_state),
+            (declared_model, detected_model, model_marker, model_state),
+        ):
+            if marker is None or state != _FIELD_BOTH_ABSENT:
+                continue
+            other = "" if detected is None else str(detected).strip()
+            if not other or is_none_token(other):
+                continue
+            differences.append(
+                DifferenceDetail(
+                    field=marker.field,
+                    declared_value=(
+                        ("" if declared is None else str(declared)).strip() or "无"
+                    ),
+                    detected_value=other,
+                    # 「无」与具体品牌/型号之间无逐字符可比性 → 不产 char_diffs（避免噪声）
+                    char_diffs=[],
+                    note=(
+                        f"{marker.description}，图内其余位置识别到的『{other}』"
+                        "不作为本体证据（仅供参考，不影响结论）"
+                    ),
+                )
+            )
+
         # ── 噪声三态：取双方"最可疑"者 ──
         noise_level = self._merge_noise_level(brand_verdict, model_verdict)
 
@@ -1081,6 +1196,19 @@ class JudgeEngine:
             if not reasons:
                 reasons.append("证据不足，转人工复核")
         else:  # PASS
+            # 【口径 v0.3.2】显式「无」标记 → 判合格的理由（比通用文案更可追溯）
+            if brand_marker is not None and brand_state == _FIELD_BOTH_ABSENT:
+                reasons.append(
+                    f"{_FIELD_BRAND}：申报为『"
+                    f"{('' if declared_brand is None else declared_brand).strip() or '无'}』，"
+                    f"{brand_marker.description}，双方均为『无』，判合格"
+                )
+            if model_marker is not None and model_state == _FIELD_BOTH_ABSENT:
+                reasons.append(
+                    f"{_FIELD_MODEL}：申报为『"
+                    f"{('' if declared_model is None else declared_model).strip() or '无'}』，"
+                    f"{model_marker.description}，双方均为『无』，判合格"
+                )
             if brand_state == _FIELD_BOTH_ABSENT and model_state == _FIELD_BOTH_ABSENT:
                 reasons.append("品牌与型号双方均为『无』，判合格")
             elif brand_state == _FIELD_BOTH_ABSENT:
@@ -1107,13 +1235,16 @@ class JudgeEngine:
         detected: str,
         verdict: Any,
         match: TokenMatch | None = None,
+        none_marker: NoneMarkerHit | None = None,
     ) -> str:
         """判定单字段状态（**v0.3.0 口径**：完整分词命中为主取证）。
 
         判定顺序（顺序本身即"不虚高"的实现）：
 
-          1. **申报侧为「无」/空** → 沿用旧链路 :meth:`_field_state`
-             （规则①「双方均为无 → ✅」/ 规则④「申报无但图内有 → ❌」语义**不变**）；
+          1. **申报侧为「无」/空**：
+             * 图内有**显式「无」标记**（v0.3.2）→ ``BOTH_ABSENT``（✅，**一致证据**）；
+             * 否则沿用旧链路 :meth:`_field_state`
+               （规则①「双方均为无 → ✅」/ 规则④「申报无但图内有 → ❌」语义**不变**）；
           2. **完整分词命中**（``EXACT`` / ``FUZZY``）→ ``MATCH``（✅）；
           3. **未命中 且 疑似噪声** → ``SUSPICIOUS``（⚠️，**绝不 ❌**）；
           4. **未命中 但 申报值与图片识别值一致**（旧链路等价证据，兼容保留）→ ``MATCH``；
@@ -1121,17 +1252,25 @@ class JudgeEngine:
              图内**根本没有**该类标识 → ``DETECTED_MISSING``（⚠️，没找到证据）。
              —— 「有证据不一致」与「没找到证据」不可混淆（SOP 1.3 红线）。
 
+        ⚠️ **v0.3.2 优先级说明**：显式「无」标记**只对"申报侧为无/缺失"生效**。
+        申报侧有值时它不参与本判定（那时它是"图内没有该标识"，属 ⚠️ 而非合格），
+        故**不会被用来把有品牌的记录判成"无品牌一致"**（不虚高红线）。
+
         Args:
             declared: 申报值。
             detected: 图片识别值（v0.3.0：作为"图内是否有同类标识"的判据）。
             verdict: 字段的 :class:`core.noise_guard.NoiseVerdict`（未命中时的兜底三态）。
             match: 完整分词匹配结果；``None`` 时等价于未命中。
+            none_marker: 图片侧「显式无标记」命中（v0.3.2）；``None`` 表示未命中。
 
         Returns:
             字段状态常量之一（:data:`_FIELD_*`）。
         """
-        # ① 申报侧为「无」→ 旧链路语义（规则① / 规则④）完全不变
+        # ① 申报侧为「无」→ 规则① / 规则④，**但先看显式「无」标记**（口径 v0.3.2）
         if is_none_token(declared):
+            if none_marker is not None:
+                # 申报无 ＋ 图内显式标注「无」→ 双方均为无的**一致证据**（用户裁定）
+                return _FIELD_BOTH_ABSENT
             return cls._field_state(declared, detected, verdict)
 
         # ② 完整分词命中 → 合格（v0.3.0 主路径）

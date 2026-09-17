@@ -38,6 +38,8 @@ __all__ = [
     "DEFAULT_FIELD_BLACKLIST",
     "DEFAULT_SKIP_PREFIXES",
     "DEFAULT_NONE_TOKENS",
+    "DEFAULT_NONE_MARKERS",
+    "NONE_MARKER_SUFFIX",
     "DEFAULT_SEPARATORS",
     "DEFAULT_COLON_VARIANTS",
     "DEFAULT_DIRTY_TAIL_CHARS",
@@ -47,6 +49,12 @@ __all__ = [
     "DEFAULT_CONFUSABLE_CHARS",
     "DEFAULT_FUZZY_MAX_EDIT_DISTANCE",
     "DEFAULT_FUZZY_MIN_LENGTH",
+    "DEFAULT_LETTER_DIFF_MIN_LENGTH",
+    "DEFAULT_LETTER_DIFF_MAX_EDIT_DISTANCE",
+    "DEFAULT_LETTER_DIFF_VERDICT",
+    "DEFAULT_LOW_CONFIDENCE_THRESHOLD",
+    "DEFAULT_FRAGMENT_MIN_CHARS",
+    "DEFAULT_KNOWN_NOISE_SAMPLES",
     "DEFAULT_FILE_NAME_PATTERN",
     "PART_DIR_SUFFIXES",
     "SHEET_HEADER_HINTS",
@@ -170,6 +178,12 @@ def verdict_label(verdict: Verdict | str) -> str:
 # ══════════════════════════════════════════════════════════════════
 
 #: 校验汇总表列名（固定 13 列，顺序即 :meth:`core.models.CheckResult.to_row` 的顺序）
+#:
+#: ⚠️ **第 10 列口径（v0.3.6，用户裁定 2026-09-17）**：列名由 ``判定依据`` 改为
+#: **``判定依据``**，语义同步扩展 —— 该列**不再只在存在差异时才有内容**，而是对
+#: **每一条记录**（✅ 校验合格 / ❌ 校验异常 / ⚠️ 缺图内标识，人工复核 / 🔵 缺图，人工复核）
+#: 都写明**判定依据**：``reason``（判定依据句）＋ 差异明细（含逐字符差异）＋ 复核备注。
+#: ⚠️ **列数与顺序不变**（仍恰好 13 列，见 :data:`COLUMN_COUNT`）。
 COLUMNS: list[str] = [
     "出货通知书号",      # 1
     "成品料号",          # 2
@@ -180,7 +194,7 @@ COLUMNS: list[str] = [
     "图片识别品牌",      # 7
     "图片识别型号",      # 8
     "校验结果",          # 9
-    "差异备注",          # 10
+    "判定依据",          # 10 ← v0.3.6 由「差异备注」更名并扩展语义
     "证据（OCR 片段）",  # 11
     "图片路径",          # 12
     "判定说明",          # 13
@@ -189,6 +203,16 @@ COLUMNS: list[str] = [
 #: 列数常量（测试硬断言用）
 COLUMN_COUNT: int = 13
 
+#: 【v0.3.7 需求 4】**人工重判标识**文案（唯一来源）。
+#:
+#: 用于两处**同一语义**的落点，故必须同源：
+#:   * 复核工作台记录表的「复核」列；
+#:   * **复核后版本**汇总表 / 复核清单的「人工复核」列。
+#:
+#: ⚠️ 与 13 列汇总表**无关**：受"13 列冻结"红线约束，原汇总表不得增列；
+#: 本标识只出现在**复核后版本**（另存文件）与 UI 中。
+MANUAL_REVIEW_MARK: str = "人工重判"
+
 
 # ══════════════════════════════════════════════════════════════════
 #  三、字段名黑名单等默认兜底值（权威载体见 rules/*.yaml）
@@ -196,10 +220,12 @@ COLUMN_COUNT: int = 13
 #  ⚠️ 同步关系：以下默认值与下列 YAML 保持一致，由 tests/test_rule_repository.py 断言
 #     - DEFAULT_FIELD_BLACKLIST / DEFAULT_SKIP_PREFIXES → rules/fields_blacklist.yaml
 #     - DEFAULT_NONE_TOKENS                             → rules/brand_patterns.yaml
+#     - DEFAULT_NONE_MARKERS                            → rules/brand_patterns.yaml
 #     - DEFAULT_SEPARATORS / DEFAULT_COLON_VARIANTS      → rules/separators.yaml
 #     - DEFAULT_DIRTY_TAIL_CHARS                        → rules/model_clean_rules.yaml
 #     - DEFAULT_WHOLE_MACHINE_CONTEXT                   → rules/whole_machine_brand.yaml
 #     - DEFAULT_CONFUSABLE_CHARS / DEFAULT_FUZZY_*      → rules/noise_signals.yaml
+#     - DEFAULT_LETTER_DIFF_*                           → rules/noise_signals.yaml
 
 #: 字段名黑名单（SOP 3.5 规则#1/#3）：提取到的"值"若命中则判为空
 #:
@@ -250,6 +276,57 @@ DEFAULT_NONE_TOKENS: list[str] = [
     "无品",
     "",
 ]
+
+# ── 【口径 · 用户裁定 2026-09-17】图片侧「显式无标记」 ────────────────────
+#:
+#: **语义**：图片 OCR 中出现**显式的**「无品牌 / 无型号」标记时，若**申报侧**该要素
+#: 也为「无」（或申报要素原文里**根本没有该要素**，解析结果为空串），则双方构成
+#: "均为无" 的**一致证据** → 该要素核验**通过**（规则①「双方均为无 → ✅」的强化证据）。
+#:
+#: ⚠️ **优先级（用户裁定）**：显式「无」标记是**标签本体的直接证据**，效力**高于**
+#: 同一票图其他位置识别到的品牌/型号文字（唛头 ``SKYWORTH P/N``、外箱
+#: ``Brand:Daewoo`` 等）。后者**仍写进「判定依据」列留痕**，仅供人工追溯，不改变结论。
+#:
+#: ⚠️ **防虚高护栏（务必保留边界断言）**：值侧必须落在**行尾或分隔符边界**上。
+#: 缺此护栏时 ``品牌:无锡机电`` 会因前缀 ``无`` 被误判为「无」标记 → 直接违反
+#: 「不虚高」红线（把有品牌判成"无品牌一致"）。
+#:
+#: ⚠️ **权威载体**为 ``rules/brand_patterns.yaml`` 的 ``none_markers``；
+#: 本常量仅作 **YAML 缺失时的兜底**，由 ``tests/test_rule_repository.py`` 断言二者一致。
+#: 每条 = ``(name, field, regex, note)``，``regex`` **无捕获组**（命中即成立）。
+DEFAULT_NONE_MARKERS: list[tuple[str, str, str, str]] = [
+    (
+        "brand_labeled",
+        FIELD_BRAND,
+        r"(?:品牌|Brand|BRAND)[ \t]*[:：]?[ \t]*"
+        r"(?:无品牌|无品|无|空|未标记|N/?A|NONE|NULL)[ \t]*"
+        r"(?=$|[\s,，。;；、|/\\])",
+        "品牌字段行的取值为「无」类（品牌:无 / 品牌：无品牌 / Brand:NONE）",
+    ),
+    (
+        "brand_bare",
+        FIELD_BRAND,
+        r"^[ \t]*无[ \t]*(?:品牌|品)[ \t]*(?=$|[\s,，。;；、|/\\])",
+        "行首的「无品牌 / 无品」独立标记",
+    ),
+    (
+        "model_labeled",
+        FIELD_MODEL,
+        r"(?:型号|规格型号|产品型号|制造商型号|Model|MODEL)[ \t]*[:：]?[ \t]*"
+        r"(?:无型号|无|空|未标记|N/?A|NONE|NULL)[ \t]*"
+        r"(?=$|[\s,，。;；、|/\\])",
+        "型号字段行的取值为「无」类（型号:无 / 型号：无型号 / Model:NONE）",
+    ),
+    (
+        "model_bare",
+        FIELD_MODEL,
+        r"^[ \t]*无[ \t]*型号[ \t]*(?=$|[\s,，。;；、|/\\])",
+        "行首的「无型号」独立标记",
+    ),
+]
+
+#: 显式无标记的**每条文案**（进「判定说明」/「判定依据」，便于人工复核）
+NONE_MARKER_SUFFIX: str = "图片中显式标注『{marker}』（图 {image}），与申报『无』一致"
 
 #: 分隔符表（SOP 实测 P8：半角竖线 / 顿号 / 分号，均可能夹空值）
 DEFAULT_SEPARATORS: list[str] = ["|", "、", ";", "；", "/"]
@@ -349,6 +426,69 @@ DEFAULT_FUZZY_MAX_EDIT_DISTANCE: int = 2
 DEFAULT_FUZZY_MIN_LENGTH: int = 5
 #: 模糊相似度命中后的判定（**强制 ⚠️，绝不直达 ❌**）
 DEFAULT_FUZZY_VERDICT: NoiseLevel = NoiseLevel.SUSPICIOUS
+
+# ── 【口径 · 用户裁定 2026-09-17】英文「只差字母」→ 待复核 ─────────────────
+#:
+#: **语义**：申报值与图片识别值**均为纯英文字母**、长度**均 > 3 个字母**、且两者
+#: 之间**只有字母之差**（编辑距离 ≤ 上限）→ OCR 极可能只是读错了字母 →
+#: **列待复核（⚠️）**，并在「判定依据」列写出逐字符差异供人工判断。
+#:
+#: **为什么单列一条**：通用模糊相似度（:data:`DEFAULT_FUZZY_MIN_LENGTH` = 5）
+#: 要求长度 ≥ 5，长度恰为 4 的纯英文串会直接落到「明确不一致（❌）」→ 假异常。
+#:
+#: ⚠️ **边界（防误放）**：仅对**纯英文字母**生效 —— 含数字/符号的型号不适用
+#: （数字之差是实体差异，非字母误读）；编辑距离超上限的品牌差异
+#: （如 ``DAEWOO`` vs ``SKYWORTH``）仍判 ❌。
+#: ⚠️ **权威载体**为 ``rules/noise_signals.yaml`` 的 ``letter_only_difference``；
+#: 本组常量仅作 **YAML 缺失时的兜底**。
+DEFAULT_LETTER_DIFF_MIN_LENGTH: int = 4
+#: 编辑距离上限（"只有字母之差"的量化阈值）
+DEFAULT_LETTER_DIFF_MAX_EDIT_DISTANCE: int = 2
+#: 命中后的判定（**强制 ⚠️，绝不直达 ❌**）
+DEFAULT_LETTER_DIFF_VERDICT: NoiseLevel = NoiseLevel.SUSPICIOUS
+
+#: OCR 低置信度阈值（**兜底**；权威载体 ``noise_signals.yaml::low_confidence_threshold``）。
+#: ⚠️ 兜底分支必须**显式传值**：漏传会静默回落到 dataclass 默认值，一旦两处取值
+#: 不同即构成"兜底 ≠ repo"（缺陷 F 同类隐患）。
+DEFAULT_LOW_CONFIDENCE_THRESHOLD: float = 0.5
+
+#: 残片最小字符数（**兜底**；权威载体 ``noise_signals.yaml::fragment_min_chars``）。
+DEFAULT_FRAGMENT_MIN_CHARS: int = 2
+
+#: 已知 OCR 误读样本表（**兜底**；权威载体为 ``rules/noise_signals.yaml``）。
+#:
+#: ⚠️ **缺陷 F 教训（本组常量即为修复而补）**：``NoiseGuard._resolve_noise_rules()``
+#: 的兜底分支必须与 repo 路径**规则集等价**，否则 YAML 缺失（如打包漏拷）时
+#: `known_noise_samples` 静默为空 → 「已知误读自动纠正」整条链路静默失效，
+#: 表现为"源码态全绿、打包后判定全变"。
+#: 每条字段语义：``ocr`` 整行形态 / ``ocr_prefix`` 运行期前缀形态 / ``expected_actual``
+#: 纠正后确定值 / ``note`` 说明。
+DEFAULT_KNOWN_NOISE_SAMPLES: list[dict[str, str]] = [
+    {
+        "ocr": "SKYHORTH P/H",
+        "ocr_prefix": "SKYHORTH",
+        "expected_actual": "SKYWORTH P/N",
+        "note": "W→H、N→H 双字符误读（v1.2 实测复现）",
+    },
+    {
+        "ocr": "IFR PIN",
+        "ocr_prefix": "IFR",
+        "expected_actual": "SKYWORTH P/N",
+        "note": "字段名整体误读（SOP 附录 A.4）",
+    },
+    {
+        "ocr": "boori E339609",
+        "ocr_prefix": "boori",
+        "expected_actual": "baori",
+        "note": "等价证据：OCR 噪声 + 型号后缀（SOP 附录 A.4）",
+    },
+    {
+        "ocr": "600-CX9",
+        "ocr_prefix": "600-CX9",
+        "expected_actual": "GXD-009",
+        "note": "倒置插头，OCR 读反（SOP 附录 A.3）",
+    },
+]
 
 
 # ══════════════════════════════════════════════════════════════════

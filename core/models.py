@@ -333,12 +333,29 @@ class DifferenceDetail:
             "note": self.note,
         }
 
-    def summary(self) -> str:
-        """生成人类可读的一行差异描述（用于「差异备注」列）。"""
-        head = f"{self.field}：申报『{self.declared_value}』 vs 图片『{self.detected_value}』"
+    def summary(self, *, include_head: bool = True, include_note: bool = True) -> str:
+        """生成人类可读的一行差异描述（用于「判定依据」列 / 复核清单「问题说明」）。
+
+        Args:
+            include_head: 是否输出「字段：申报『x』 vs 图片『y』」**对照句**。
+                当该对照**已经出现在** ``CheckResult.reason`` 里时，调用方应传
+                ``False`` —— 只保留字段名前缀，避免同一层依据在同一格里重复两遍（v0.3.6）。
+            include_note: 是否附上 :attr:`note`。同因：``note`` 已在 ``reason`` 里
+                出现时应传 ``False``。
+
+        Returns:
+            一行差异描述（字段级对照 + 逐字符差异 + 可选备注）。
+        """
+        if include_head:
+            head = (
+                f"{self.field}：申报『{self.declared_value}』 vs 图片『{self.detected_value}』"
+            )
+        else:
+            head = f"{self.field}：" if self.field else ""
         if self.char_diffs:
-            head += "；差异点：" + "".join(self.char_diffs)
-        if self.note:
+            # 有对照句时用「；」分隔；仅有字段名前缀时直接衔接（``品牌：差异点：…``）
+            head += ("；" if include_head else "") + "差异点：" + "".join(self.char_diffs)
+        if include_note and self.note:
             head += f"（{self.note}）"
         return head
 
@@ -389,6 +406,40 @@ class CheckResult:
     unreachable: bool = False
     #: 完整分词命中结果（**不占 13 列**；仅进 ``to_dict`` + 复核工作台）
     token_matches: list[TokenMatch] = dc_field(default_factory=list)
+    #: 【v0.3.7 需求 4】**人工重判前**的系统判定（``None`` = 本条从未被人工重判）。
+    #:
+    #: 「重判结果不覆盖原系统产生的结果」在**数据层**的落点：
+    #: :attr:`verdict` 会被人工复核覆盖（UI / 导出的复核后版本按它走），
+    #: 而**系统原本判成什么**由本字段原样保留 —— 两次及以上的重判
+    #: **只在第一次**记录，后续重判不得改写它（否则会退化成"上次重判值"而非"系统值"）。
+    original_verdict: Verdict | None = None
+    #: 最近一次人工重判的时间（ISO 8601；未重判为空串）
+    reviewed_at: str = ""
+
+    def manual_review_mark(self) -> str:
+        """返回「人工重判」标识文案（未人工重判返回空串）。
+
+        ⚠️ **单一出口**：复核工作台记录表的「复核」列与**复核后版本**汇总表 /
+        复核清单的「人工复核」列**必须**都调用本方法 —— 两处各写一遍就是漂移温床。
+
+        Returns:
+            :data:`core.constants.MANUAL_REVIEW_MARK` 或空串。
+        """
+        from core import constants as _C
+
+        return _C.MANUAL_REVIEW_MARK if self.manually_reviewed else ""
+
+    def original_verdict_text(self) -> str:
+        """返回**人工重判前**的系统判定文案（口径字符串；未重判返回空串）。
+
+        Returns:
+            如 ``❌ 校验异常``；:attr:`original_verdict` 为 ``None`` 时返回空串。
+        """
+        from core import constants as _C
+
+        if self.original_verdict is None:
+            return ""
+        return _C.verdict_text(self.original_verdict)
 
     def token_match_for(self, field_name: str) -> TokenMatch | None:
         """取某字段的完整分词命中结果（无则 ``None``）。
@@ -403,6 +454,57 @@ class CheckResult:
             if getattr(match, "field", "") == field_name:
                 return match
         return None
+
+    def verdict_basis(self) -> str:
+        """拼装**「判定依据」**文本（v0.3.6，用户裁定 2026-09-17）。
+
+        语义：``判定依据`` = 「**为什么**给出这个结论」的完整文字留痕，
+        **每一条记录都有**（✅ / ❌ / ⚠️ / 🔵 四类均不例外）。三段拼接：
+
+          1. :attr:`reason` —— 判定依据句。四类结论**均有**：
+             ✅「…判合格」/ ❌「…明确不一致」/ ⚠️「疑似 OCR 噪声…转人工复核」/
+             🔵「…未找到图片」；
+          2. 差异明细 —— 字段级对照 ＋ **逐字符差异**（SOP 3.4 规则 5，可追溯红线）；
+          3. :attr:`reviewer_note` —— 人工复核填写的内容（若已复核）。
+
+        ⚠️ **去重（必须保留）**：``judge_engine`` 会把字段级依据**同时**写进
+        ``reason`` 与 :attr:`DifferenceDetail.note`，无脑拼接会让同一句话在
+        同一格内重复两三遍（v0.3.6 首轮端到端实测复现）。因此：
+
+          * ``note`` 已出现在 ``reason`` 里 → 不再附注；
+          * 字段级对照（申报值 ＋ 图片值）已由 ``reason`` 表达 → 只补「差异点」，
+            不重复对照句；
+          * 上述两者**都**冗余且无逐字符差异 → 整条差异跳过。
+
+        ⚠️ **单一出口**：本方法是「判定依据」文本的**唯一**生产者，
+        :meth:`to_row`（13 列汇总表第 10 列）与
+        :meth:`core.result_exporter.ResultExporter._review_row`（复核清单
+        「问题说明」）**必须**都调用它 —— 两处各写一遍就是漂移温床。
+
+        Returns:
+            以 ``；`` 连接的判定依据文本；无任何内容时返回空串。
+        """
+        parts: list[str] = []
+        if self.reason:
+            parts.append(self.reason)
+        for d in self.differences:
+            note_in_reason = bool(d.note) and d.note in self.reason
+            # 该差异的字段级对照（申报值 + 图片值）是否已由 reason 表达过
+            compared_in_reason = (
+                (not d.declared_value or d.declared_value in self.reason)
+                and (not d.detected_value or d.detected_value in self.reason)
+            )
+            if compared_in_reason and not d.char_diffs and note_in_reason:
+                continue  # 该差异的全部信息都已在 reason 里 → 不重复
+            parts.append(
+                d.summary(
+                    include_head=not compared_in_reason,
+                    include_note=bool(d.note) and not note_in_reason,
+                )
+            )
+        if self.reviewer_note:
+            parts.append(f"复核备注：{self.reviewer_note}")
+        return "；".join(p for p in parts if p)
 
     def to_dict(self) -> dict[str, Any]:
         """序列化为字典（含完整证据，供 JSON 详细日志）。"""
@@ -422,6 +524,12 @@ class CheckResult:
             "evidence_images": [e.to_dict() for e in self.evidence_images],
             "unreachable": self.unreachable,
             "token_matches": [m.to_dict() for m in self.token_matches],
+            # v0.3.7 需求 4：原系统判定 + 复核时间（**不占 13 列**，只进详细 JSON）
+            "original_verdict": (
+                self.original_verdict.value if self.original_verdict is not None else None
+            ),
+            "original_verdict_text": self.original_verdict_text(),
+            "reviewed_at": self.reviewed_at,
         }
 
     def to_row(self) -> list[Any]:
@@ -448,9 +556,12 @@ class CheckResult:
         decl_brand = record.decl_brand if record is not None else ""
         decl_model = record.decl_model if record is not None else ""
 
-        diff_note = "；".join(d.summary() for d in self.differences) if self.differences else ""
-        if self.reviewer_note:
-            diff_note = (diff_note + "；" if diff_note else "") + f"复核备注：{self.reviewer_note}"
+        # ── 第 10 列「判定依据」（v0.3.6，用户裁定 2026-09-17）─────────────
+        # 口径变化：由「差异备注」（**只在存在差异时才有内容** → ✅ 行整格为空）
+        # 改为「判定依据」（**每一条记录**都写明依据）。
+        # 拼装逻辑收口到 :meth:`verdict_basis`（与复核清单「问题说明」共用同一出口，
+        # 避免两处各写一遍造成漂移）。
+        verdict_basis = self.verdict_basis()
 
         return [
             ticket_no,                                # 1  出货通知书号
@@ -462,7 +573,7 @@ class CheckResult:
             self.detected_brand,                      # 7  图片识别品牌
             self.detected_model,                      # 8  图片识别型号
             _C.verdict_text(self.verdict),            # 9  校验结果
-            diff_note,                                # 10 差异备注
+            verdict_basis,                            # 10 判定依据（v0.3.6）
             self.evidence_text,                       # 11 证据（OCR 片段）
             self.image_paths,                         # 12 图片路径
             self.reason,                              # 13 判定说明

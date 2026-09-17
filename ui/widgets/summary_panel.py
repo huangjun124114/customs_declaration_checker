@@ -214,24 +214,50 @@ class SummaryPanel(QFrame):
         self.artifacts_label.setText("三产物：尚未产出")
 
     def show_artifacts(self, output_paths: dict[str, str]) -> None:
-        """显示三产物落点。
+        """显示产物落点（原始三产物 或 v0.3.7 的**复核后版本**）。
 
         Args:
-            output_paths: ``{"summary"|"review_csv"|"review"|"detail_json"|"detail": 路径}``。
+            output_paths: 键取自
+                ``{"summary", "review_csv", "review", "detail_json", "detail"}``（原始三产物）
+                或 ``{"summary_reviewed", "review_reviewed", "reviewed_json"}``
+                （v0.3.7 需求 4 的复核后版本，标题与标签会相应变化）。
         """
         if not output_paths:
             self.artifacts_label.setText("三产物：尚未产出")
             return
-        lines = ["三产物已落盘："]
         labels = {
             "summary": "汇总表",
             "review_csv": "复核清单",
             "review": "复核清单",
             "detail_json": "详细日志(JSON)",
             "detail": "详细日志(JSON)",
+            "summary_reviewed": "复核后汇总表",
+            "review_reviewed": "复核后复核清单",
+            "reviewed_json": "复核后详细日志(JSON)",
         }
+        order = (
+            "summary",
+            "review_csv",
+            "review",
+            "detail_json",
+            "detail",
+            "summary_reviewed",
+            "review_reviewed",
+            "reviewed_json",
+        )
+        is_reviewed = any(key in output_paths for key in (
+            "summary_reviewed",
+            "review_reviewed",
+            "reviewed_json",
+        ))
+        header = (
+            "复核后版本已落盘（原系统产物未改动）："
+            if is_reviewed
+            else "三产物已落盘："
+        )
+        lines = [header]
         seen = set()
-        for key in ("summary", "review_csv", "review", "detail_json", "detail"):
+        for key in order:
             path = output_paths.get(key, "")
             if path and key not in seen:
                 seen.add(key)

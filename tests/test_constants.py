@@ -140,6 +140,44 @@ class TestDefaults:
         assert C.DEFAULT_FUZZY_VERDICT == NoiseLevel.SUSPICIOUS
         assert C.DEFAULT_FUZZY_VERDICT != NoiseLevel.CLEAR_MISMATCH
 
+    def test_letter_diff_defaults(self) -> None:
+        """口径 v0.3.2：英文「只差字母」参数（长度 > 3、编辑距离 ≤ 2、强制 ⚠️）。"""
+        assert C.DEFAULT_LETTER_DIFF_MIN_LENGTH == 4
+        assert C.DEFAULT_LETTER_DIFF_MAX_EDIT_DISTANCE == 2
+        assert C.DEFAULT_LETTER_DIFF_VERDICT == NoiseLevel.SUSPICIOUS
+        assert C.DEFAULT_LETTER_DIFF_VERDICT != NoiseLevel.CLEAR_MISMATCH
+
+    def test_none_markers_defaults(self) -> None:
+        """口径 v0.3.2：显式无标记兜底表（品牌 / 型号各两条：字段行 + 独立行）。"""
+        assert C.DEFAULT_NONE_MARKERS
+        fields = [field for _name, field, _regex, _note in C.DEFAULT_NONE_MARKERS]
+        assert fields.count(C.FIELD_BRAND) == 2
+        assert fields.count(C.FIELD_MODEL) == 2
+        # 每条都必须有正则（正则语法由 test_rule_repository 校验）
+        for name, field, regex, _note in C.DEFAULT_NONE_MARKERS:
+            assert name and field and regex
+
+    def test_none_marker_suffix_mentions_marker(self) -> None:
+        assert "{marker}" in C.NONE_MARKER_SUFFIX
+
+    def test_known_noise_samples_defaults(self) -> None:
+        """⚠️ 缺陷 F：兜底样本表必须实际存在（否则 YAML 缺失时静默失效）。"""
+        assert C.DEFAULT_KNOWN_NOISE_SAMPLES
+        for sample in C.DEFAULT_KNOWN_NOISE_SAMPLES:
+            assert sample.get("expected_actual")
+
+    def test_v032_constants_exported(self) -> None:
+        """新口径常量必须进 ``__all__``（防被当成私有符号悄悄改动）。"""
+        for name in (
+            "DEFAULT_NONE_MARKERS",
+            "NONE_MARKER_SUFFIX",
+            "DEFAULT_LETTER_DIFF_MIN_LENGTH",
+            "DEFAULT_LETTER_DIFF_MAX_EDIT_DISTANCE",
+            "DEFAULT_LETTER_DIFF_VERDICT",
+            "DEFAULT_KNOWN_NOISE_SAMPLES",
+        ):
+            assert name in C.__all__
+
     def test_separators(self) -> None:
         assert "|" in C.DEFAULT_SEPARATORS
         assert "、" in C.DEFAULT_SEPARATORS

@@ -129,6 +129,123 @@ class TestSummaryColumns:
 
 
 # ══════════════════════════════════════════════════════════════════
+#  v0.3.6 · 第 10 列「判定依据」（用户裁定 2026-09-17）
+#
+#  原「差异备注」**只在存在差异时才有内容** → ✅ 合格行整格为空，合格记录拿不到依据。
+#  现改为「判定依据」：对**每一条记录**都写明依据 ——
+#  ``reason``（判定依据句）＋ 差异明细（含逐字符差异）＋ 复核备注。
+#  ⚠️ 改的是**列名与内容口径**，列数与顺序**不变**（仍恰好 13 列）。
+# ══════════════════════════════════════════════════════════════════
+
+#: 第 10 列（0-based = 9）在 ``to_row()`` 里的下标
+BASIS_COLUMN_INDEX = 9
+
+
+class TestVerdictBasisColumn:
+    """第 10 列列名与内容口径：**四类结论都必须落盘判定依据**。"""
+
+    def test_column_renamed(self) -> None:
+        """列名「差异备注」→「判定依据」，且列数与顺序不变。"""
+        assert COLUMNS[BASIS_COLUMN_INDEX] == "判定依据"
+        assert "差异备注" not in COLUMNS
+        assert len(COLUMNS) == COLUMN_COUNT == 13
+
+    @pytest.mark.parametrize("verdict", list(Verdict), ids=lambda v: v.name)
+    def test_every_verdict_has_basis(self, verdict: Verdict) -> None:
+        """✅/❌/⚠️/🔵 **四类结论**在第 10 列都必须有判定依据（不得为空）。"""
+        result = make_result(verdict)
+        basis = result.to_row()[BASIS_COLUMN_INDEX]
+        assert basis, f"{verdict.value} 的判定依据为空 —— 又退回「只有差异才有内容」"
+        assert basis == result.reason
+
+    def test_diff_details_appended_after_reason(self) -> None:
+        """有差异时：reason 在前，差异明细（含逐字符差异）在后。"""
+        from core.models import DifferenceDetail
+
+        result = make_result(Verdict.FAIL)
+        result.reason = "品牌：申报『baori』与图片『Daewoo』明确不一致"
+        result.differences = [
+            DifferenceDetail(
+                field="品牌",
+                declared_value="baori",
+                detected_value="Daewoo",
+                char_diffs=["『申报b』→『图片D』（第0位起）"],
+                note="外箱整机品牌，不构成本体证据",
+            )
+        ]
+        basis = result.to_row()[BASIS_COLUMN_INDEX]
+        assert basis.startswith("品牌：申报『baori』与图片『Daewoo』明确不一致")
+        assert "差异点：" in basis
+        assert "外箱整机品牌" in basis
+
+    def test_note_deduped_against_reason(self) -> None:
+        """差异明细的 note 若已出现在 reason 里 → **不再重复**。
+
+        ``judge_engine`` 会把字段级依据**同时**写进 ``reason`` 与
+        ``DifferenceDetail.note``；两段拼成一格时不去重就会出现同句两三遍。
+        """
+        from core.models import DifferenceDetail
+
+        note = "品牌：申报『baori』与图片『NMY』明确不一致"
+        result = make_result(Verdict.FAIL)
+        result.reason = note
+        result.differences = [
+            DifferenceDetail(
+                field="品牌",
+                declared_value="baori",
+                detected_value="NMY",
+                char_diffs=["『申报baori』→『图片NMY』（第0位起）"],
+                note=note,
+            )
+        ]
+        basis = result.to_row()[BASIS_COLUMN_INDEX]
+        assert basis.count(note) == 1, f"同句重复：{basis!r}"
+        assert "差异点：" in basis
+
+    def test_note_kept_when_not_in_reason(self) -> None:
+        """note 不在 reason 里时**必须保留**（如「外箱整机品牌，不构成本体证据」）。"""
+        from core.models import DifferenceDetail
+
+        result = make_result(Verdict.FAIL)
+        result.reason = "品牌：申报『baori』与图片『Daewoo』明确不一致"
+        result.differences = [
+            DifferenceDetail(
+                field="品牌",
+                declared_value="baori",
+                detected_value="Daewoo",
+                note="外箱整机品牌，不构成本体证据",
+            )
+        ]
+        basis = result.to_row()[BASIS_COLUMN_INDEX]
+        assert "外箱整机品牌，不构成本体证据" in basis
+
+    def test_reviewer_note_appended(self) -> None:
+        """复核备注一并写进「判定依据」。"""
+        result = make_result(Verdict.NO_MARK)
+        result.reason = "图片内未识别到品牌/型号文字，转人工复核"
+        result.reviewer_note = "已看图确认标签无品牌"
+        basis = result.to_row()[BASIS_COLUMN_INDEX]
+        assert "复核备注：已看图确认标签无品牌" in basis
+
+    def test_exported_sheet_basis_not_empty_for_pass(
+        self, exporter: ResultExporter
+    ) -> None:
+        """端到端：导出的 xlsx 里，✅ 行的第 10 列也必须有依据。"""
+        from openpyxl import load_workbook
+
+        path = exporter.export_summary([make_result(Verdict.PASS)], "SA26090215")
+        workbook = load_workbook(str(path), read_only=True)
+        sheet = workbook.active
+        header = list(next(sheet.iter_rows(min_row=1, max_row=1, values_only=True)))
+        assert len(header) == 13
+        assert header[BASIS_COLUMN_INDEX] == "判定依据"
+        row = list(next(sheet.iter_rows(min_row=2, max_row=2, values_only=True)))
+        assert row[BASIS_COLUMN_INDEX], "✅ 行的判定依据为空"
+        assert row[BASIS_COLUMN_INDEX] == row[12]  # 无差异时 = reason（= 第 13 列）
+        workbook.close()
+
+
+# ══════════════════════════════════════════════════════════════════
 #  ⑨ 产物分流
 # ══════════════════════════════════════════════════════════════════
 
@@ -248,6 +365,41 @@ class TestReviewCsv:
     def test_review_verdicts_constant(self) -> None:
         """``REVIEW_VERDICTS`` 只含 ⚠️ + 🔵。"""
         assert set(REVIEW_VERDICTS) == {Verdict.NO_MARK, Verdict.NO_IMAGE}
+
+    def test_problem_column_shares_basis_exit(
+        self, exporter: ResultExporter
+    ) -> None:
+        """「问题说明」与汇总表第 10 列**同源同文**（v0.3.6 单一出口）。
+
+        此前两处各写一遍 ``reason + d.summary()``，同一条依据（既在 ``reason``
+        又在 ``DifferenceDetail.note``）会拼出同句两三遍。收口到
+        ``CheckResult.verdict_basis()`` 后，两边必须逐字相同。
+        """
+        import csv
+
+        from core.models import DifferenceDetail
+
+        note = "品牌：申报『baori』与图片『NMY』明确不一致"
+        result = make_result(Verdict.NO_MARK)
+        result.reason = note
+        result.differences = [
+            DifferenceDetail(
+                field="品牌",
+                declared_value="baori",
+                detected_value="NMY",
+                char_diffs=["『申报baori』→『图片NMY』（第0位起）"],
+                note=note,
+            )
+        ]
+
+        path = exporter.export_review_csv([result], "SA26090215")
+        with open(path, encoding="utf-8-sig", newline="") as fh:
+            rows = list(csv.reader(fh))
+        problem = rows[1][REVIEW_COLUMNS.index("问题说明")]
+
+        basis = result.to_row()[BASIS_COLUMN_INDEX]
+        assert problem == basis
+        assert problem.count(note) == 1, f"同句重复：{problem!r}"
 
     def test_csv_path_name(self, exporter: ResultExporter) -> None:
         path = exporter.export_review_csv([], "SA26090215")

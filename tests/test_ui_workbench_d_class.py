@@ -322,12 +322,30 @@ def test_default_current_image_is_first_existing(qapp) -> None:
 
 
 def test_current_image_button_highlighted(qapp) -> None:
-    """9.2：图号按钮区保留为切换器，当前选中态高亮。"""
+    """9.2 + v0.3.7 需求 1：卡片仍记录当前图；**高亮态已迁至图片下方切换条**。
+
+    v0.3.7 前图号按钮挂在 ``WorkbenchCard`` 内（整卡纵向滚动 → 判定原因一长就被
+    推到折叠线以下，现场"看不到切换按钮"）。现按钮随切换条下沉到
+    ``ImageViewer``，故本用例拆为两段：卡片侧只验状态同步，按钮四态验在
+    :func:`test_switcher_current_button_highlighted`。
+    """
     card = _card(qapp)
     card.load_result(_three_image_result())
     card.set_current_image("C:/img/3.jpg")
-    assert card._seq_buttons["C:/img/3.jpg"].property("evidenceCurrent") is True  # noqa: SLF001
-    assert card._seq_buttons["C:/img/1.jpg"].property("evidenceCurrent") is False  # noqa: SLF001
+    assert card.current_image_path() == "C:/img/3.jpg"
+
+
+def test_switcher_current_button_highlighted(qapp) -> None:
+    """v0.3.7 需求 1/2：图片下方切换条上，当前图按钮 ``evidenceCurrent`` 为真。"""
+    from ui.widgets.image_viewer import ImageViewer
+
+    viewer = ImageViewer()
+    viewer.set_images(
+        [(1, "C:/img/1.jpg", True), (2, "C:/img/2.jpg", False), (3, "C:/img/3.jpg", False)]
+    )
+    viewer.set_current_image("C:/img/3.jpg")
+    assert viewer._image_buttons["C:/img/3.jpg"].property("evidenceCurrent") is True  # noqa: SLF001
+    assert viewer._image_buttons["C:/img/1.jpg"].property("evidenceCurrent") is False  # noqa: SLF001
 
 
 def test_workbench_evidence_selected_syncs_card(qapp) -> None:
@@ -540,10 +558,24 @@ def test_flow_labels_are_shown_synchronously_after_render(qapp) -> None:
     assert labels, "散行区应有标签"
     assert all(not lb.isHidden() for lb in labels), "新增标签必须当拍非隐藏"
     assert card.line_flow.heightForWidth(card.scroll.viewport().width()) > 0
-    # 证据图号按钮同理（同一 queued 机制）
-    assert card.evidence_buttons_row.count() > 0
-    btn = card.evidence_buttons_row.itemAt(0).widget()
-    assert btn is not None and not btn.isHidden()
+
+
+def test_switcher_buttons_are_shown_synchronously(qapp) -> None:
+    """**同一 queued 机制的根因锁（v0.3.7 迁移后）**：切换条按钮必须当拍非隐藏。
+
+    图号按钮从 ``WorkbenchCard.evidence_buttons_row`` 迁到
+    ``ImageViewer.thumbs_layout`` —— 迁移不得带走 ``show()``，否则
+    ``FlowLayout.heightForWidth()`` 仍会算成 0（v0.3.1 现场缺陷原样复发）。
+    """
+    from ui.widgets.image_viewer import ImageViewer
+
+    viewer = ImageViewer()
+    viewer.set_images([(1, "C:/img/1.jpg", False), (2, "C:/img/2.jpg", True)])  # 刻意不 processEvents
+    assert viewer.thumbs_layout.count() == 2
+    for idx in range(viewer.thumbs_layout.count()):
+        widget = viewer.thumbs_layout.itemAt(idx).widget()
+        assert widget is not None and not widget.isHidden(), "切换条按钮必须当拍非隐藏"
+    assert viewer.thumbs_layout.heightForWidth(400) > 0
 
 
 def test_chain_declared_column_shows_declared_values(qapp) -> None:
@@ -914,6 +946,231 @@ def test_view_ocr_dialog_closed_with_card_clear(qapp) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════
+#  v0.3.3：申报要素原文弹窗（按钮「查看申报要素」）
+# ══════════════════════════════════════════════════════════════════
+
+_RAW_ELEMENT = "用途:电视机用|结构类型:有接头|品牌:baori|型号:无|额定电压:60V"
+
+
+def _decl_result(raw: str = _RAW_ELEMENT) -> CheckResult:
+    """构造一条**带申报要素原文**的记录（供申报要素弹窗用例）。"""
+    result = _three_image_result()
+    assert result.record is not None
+    result.record.seq_no = 3
+    result.record.raw_element_text = raw
+    return result
+
+
+def _all_hbox_layouts(widget):
+    """收集 ``widget`` 子树里的全部 ``QHBoxLayout``（供"同一行"断言）。
+
+    ⚠️ 不能用「从 ``widget.layout()`` 逐层 ``itemAt`` 递归」的写法：卡片正文挂在
+    ``QScrollArea`` 的 ``content`` 上（``setWidget`` 而非入布局），逐层递归会**整段漏掉**。
+    ``QLayout`` 本身是 ``QObject``（子布局的 QObject 父是外层布局），故用
+    ``findChildren`` 递归收集才可靠。
+    """
+    from PySide6.QtWidgets import QHBoxLayout
+
+    return list(widget.findChildren(QHBoxLayout))
+
+
+def _widget_index(row, target) -> int:
+    """返回 ``target`` 在 ``row`` 中的下标；不在该行则 ``-1``。"""
+    for i in range(row.count()):
+        if row.itemAt(i).widget() is target:
+            return i
+    return -1
+
+
+def test_decl_button_exists_beside_ocr_button(qapp) -> None:
+    """v0.3.3：新增「查看申报要素」按钮，且**紧邻**在 OCR 按钮右侧（同一行同一布局）。"""
+    card = _card(qapp)
+    card.load_result(_decl_result())
+
+    assert card.btn_view_ocr.text() == "查看原始 OCR 文本"
+    assert card.btn_view_decl.text() == "查看申报要素"
+
+    adjacent = [
+        row
+        for row in _all_hbox_layouts(card)
+        if (
+            (idx := _widget_index(row, card.btn_view_ocr)) >= 0
+            and idx + 1 < row.count()
+            and row.itemAt(idx + 1).widget() is card.btn_view_decl
+        )
+    ]
+    assert adjacent, "「查看申报要素」必须紧邻「查看原始 OCR 文本」右侧（同一行）"
+
+
+def test_view_decl_dialog_shows_raw_element_text_verbatim(qapp) -> None:
+    """v0.3.3 核心：弹窗正文 == ``record.raw_element_text``，**逐字符原样**（不 strip / 不清洗）。"""
+    raw = "  用途:电视机用|品牌:无|型号：无  \n第二行;品牌;无;型号:L8M30E0  "
+    card = _card(qapp)
+    card.load_result(_decl_result(raw))
+
+    card._on_view_decl()  # noqa: SLF001
+    qapp.processEvents()
+
+    assert card.decl_dialog.isVisible() is True
+    assert card.decl_dialog.current_text() == raw, "正文必须与原文逐字符相同（含首尾空白）"
+    card.decl_dialog.close()
+
+
+def test_view_decl_dialog_title_identifies_record(qapp) -> None:
+    """v0.3.3：标题带序号 / 料号 / 订单号 / 票号，便于复核留痕。"""
+    card = _card(qapp)
+    card.load_result(_decl_result())
+
+    assert card._decl_dialog_title(card._record()) == (  # noqa: SLF001
+        "第 3 条 · 料号 N1 · 订单号 O1 · 票号 SA26090215"
+    )
+    card._on_view_decl()  # noqa: SLF001
+    qapp.processEvents()
+    assert "料号 N1" in card.decl_dialog.title_label.text()
+    card.decl_dialog.close()
+
+
+def test_decl_dialog_title_is_pure_and_tolerates_empty_record() -> None:
+    """v0.3.3：标题构造是**纯函数**，空记录 / 缺字段不抛异常。"""
+    from ui.widgets.workbench_card import WorkbenchCard
+
+    assert WorkbenchCard._decl_dialog_title(None) == "（未知记录）"  # noqa: SLF001
+
+    bare = DeclarationRecord()
+    assert WorkbenchCard._decl_dialog_title(bare) == "（未知记录）"  # noqa: SLF001
+
+    only_part = DeclarationRecord(part_no="P9")
+    assert WorkbenchCard._decl_dialog_title(only_part) == "料号 P9"  # noqa: SLF001
+
+
+def test_decl_dialog_has_no_image_navigation(qapp) -> None:
+    """v0.3.3：申报要素是**记录级**原文 → 不提供「上一张 / 下一张」，但保留「复制全文」。"""
+    card = _card(qapp)
+    card.load_result(_decl_result())
+    card._on_view_decl()  # noqa: SLF001
+    qapp.processEvents()
+
+    dialog = card.decl_dialog
+    assert dialog.btn_prev.isVisible() is False
+    assert dialog.btn_next.isVisible() is False
+    assert dialog.btn_copy.isVisible() is True
+    # 对照：OCR 弹窗仍保留翻图导航
+    card._on_view_ocr()  # noqa: SLF001
+    qapp.processEvents()
+    assert card.ocr_dialog.btn_prev.isVisible() is True
+    card.ocr_dialog.close()
+
+
+def test_decl_dialog_content_ignores_current_image(qapp) -> None:
+    """v0.3.3：切图**不改变**申报要素内容（记录级），但切记录会跟随刷新。"""
+    card = _card(qapp)
+    card.load_result(_decl_result())
+    card._on_view_decl()  # noqa: SLF001
+    qapp.processEvents()
+    dialog = card.decl_dialog
+    before = dialog.current_text()
+
+    card.set_current_image("C:/img/3.jpg")
+    qapp.processEvents()
+    assert dialog.current_text() == before, "切图不得影响申报要素原文"
+
+    card.load_result(_decl_result("品牌:无|型号:A9KB9G"))
+    qapp.processEvents()
+    assert dialog.current_text() == "品牌:无|型号:A9KB9G", "换记录后弹窗须同步换原文"
+    dialog.close()
+
+
+def test_decl_and_ocr_dialogs_are_mutually_exclusive(qapp) -> None:
+    """v0.3.3：两弹窗共用右侧定位 → **互斥**（开一个即关另一个，避免完全叠窗）。"""
+    card = _card(qapp)
+    card.load_result(_decl_result())
+
+    card._on_view_decl()  # noqa: SLF001
+    qapp.processEvents()
+    assert card.decl_dialog.isVisible() is True
+
+    card._on_view_ocr()  # noqa: SLF001
+    qapp.processEvents()
+    assert card.ocr_dialog.isVisible() is True
+    assert card.decl_dialog.isVisible() is False
+
+    card._on_view_decl()  # noqa: SLF001
+    qapp.processEvents()
+    assert card.decl_dialog.isVisible() is True
+    assert card.ocr_dialog.isVisible() is False
+    card.decl_dialog.close()
+
+
+def test_decl_dialog_does_not_cover_image_area(qapp) -> None:
+    """v0.3.3 红线：申报要素弹窗同样**不得覆盖图片区**（复用 v0.3.1 定位逻辑）。"""
+    from app.session import AppSession
+    from ui.widgets.review_workbench import ReviewWorkbench
+
+    session = AppSession()
+    session.replace([_decl_result()], ticket_no="SA26090215")
+    workbench = ReviewWorkbench(session)
+    workbench.resize(1100, 620)
+    workbench.show()
+    qapp.processEvents()
+
+    card = workbench.card
+    card._on_view_decl()  # noqa: SLF001
+    qapp.processEvents()
+
+    viewer = workbench.image_viewer
+    assert viewer.geometry().width() > 0
+    assert card.decl_dialog.isVisible() is True
+    assert card.decl_dialog.overlap_with(viewer) is False
+    card.decl_dialog.close()
+    workbench.close()
+
+
+def test_decl_dialog_closed_with_card_clear(qapp) -> None:
+    """v0.3.3：卡片 clear（切走记录）时申报要素弹窗一并隐藏，不滞留旧原文。"""
+    card = _card(qapp)
+    card.load_result(_decl_result())
+    card._on_view_decl()  # noqa: SLF001
+    qapp.processEvents()
+    assert card.decl_dialog.isVisible() is True
+    card.clear()
+    qapp.processEvents()
+    assert card.decl_dialog.isVisible() is False
+
+
+def test_decl_dialog_noop_without_result(qapp) -> None:
+    """v0.3.3：未载入记录时点击不弹窗（避免展示空壳）。"""
+    card = _card(qapp)
+    card._on_view_decl()  # noqa: SLF001
+    qapp.processEvents()
+    assert card.decl_dialog.isVisible() is False
+
+
+def test_decl_dialog_missing_raw_text_shows_placeholder(qapp) -> None:
+    """v0.3.3：记录无申报要素原文时显示明确占位语，而不是空白窗口。"""
+    card = _card(qapp)
+    card.load_result(_decl_result(""))
+    card._on_view_decl()  # noqa: SLF001
+    qapp.processEvents()
+    assert "无申报要素原文" in card.decl_dialog.current_text()
+    card.decl_dialog.close()
+
+
+def test_decl_dialog_hint_reports_parsed_values(qapp) -> None:
+    """v0.3.3：提示语给出**解析结果**（品牌/型号），与正文原样原文并列，便于人工比对。"""
+    from ui.widgets.workbench_card import WorkbenchCard
+
+    card = _card(qapp)
+    card.load_result(_decl_result())
+
+    hint = card._decl_parse_hint(card._record())  # noqa: SLF001
+    assert "baori" in hint and "解析" in hint
+    # 无解析结果时给明确说明，而非空白
+    empty = WorkbenchCard._decl_parse_hint(DeclarationRecord())  # noqa: SLF001
+    assert "未从该原文解析出" in empty
+    assert WorkbenchCard._decl_parse_hint(None) == ""  # noqa: SLF001
+
+
+# ══════════════════════════════════════════════════════════════════
 #  需求 2：图片旋转（左旋 / 右旋 90°）
 # ══════════════════════════════════════════════════════════════════
 
@@ -1028,14 +1285,19 @@ def _workbench(qapp):
     return ReviewWorkbench(_mixed_session())
 
 
-def test_record_table_has_three_columns(qapp) -> None:
-    """需求 4：记录区为表格，三列「订单号 / 物料编号 / 核验结果」。"""
+def test_record_table_has_four_columns(qapp) -> None:
+    """需求 4 + v0.3.7 需求 4：记录区四列「订单号 / 物料编号 / 核验结果 / 复核」。
+
+    v0.3.7 需求 4 明确要求「人工重判的记录需在结果表中进行标识」→ 在记录表尾部
+    追加**「复核」列**承载该标识（13 列汇总表冻结红线只约束**导出产物**，
+    不约束工作台内的记录表）。
+    """
     workbench = _workbench(qapp)
     headers = [
         workbench.record_table.horizontalHeaderItem(col).text()
         for col in range(workbench.record_table.columnCount())
     ]
-    assert headers == ["订单号", "物料编号", "核验结果"]
+    assert headers == ["订单号", "物料编号", "核验结果", "复核"]
     assert workbench.record_table.rowCount() == 4
     assert not hasattr(workbench, "record_list")
 
@@ -1256,6 +1518,37 @@ def test_edit_ticket_emits_inputs_changed(qapp, monkeypatch) -> None:
     )
     panel._on_edit_ticket()  # noqa: SLF001
     assert fired == [1]
+
+
+def test_path_edits_emit_inputs_changed(qapp) -> None:
+    """**v0.3.7 缺陷锁**：手工输入路径必须能发 ``inputs_changed``。
+
+    原缺陷：``edit.textChanged.connect(self.inputs_changed.emit)`` ——
+    ``textChanged`` 只有 ``(str)`` 一个重载，``Signal.emit`` 形参是 ``*args``，
+    PySide6 不截断参数 → ``inputs_changed.emit(文本)``
+    → ``TypeError: inputs_changed() only accepts 0 argument(s), 1 given!``
+    → 信号**从未发出**（stderr 每次都抛，现场看不见）。
+
+    对照：``QPushButton.clicked`` 有 ``clicked()`` / ``clicked(bool)`` 双重载，
+    同样的写法**恰好能用** —— 本用例顺带把「按钮那种写法能用」也钉住，
+    免得日后有人"统一风格"把槽改回 ``.emit``。
+    """
+    panel = _panel(qapp)
+    fired: list[int] = []
+    panel.inputs_changed.connect(lambda: fired.append(1))
+
+    panel.excel_edit.setText("C:/x.xlsx")
+    panel.share_edit.setText("C:/imgs")
+    assert fired == [1, 1], "路径输入框手工输入/粘贴必须发出 inputs_changed"
+
+    fired.clear()
+    panel.excel_edit.clear()
+    assert fired == [1], "清空路径同样应发出"
+
+    # 对照：按钮的 `.emit` 直连写法可用（双重载所致）
+    fired.clear()
+    panel.probe_btn.click()
+    assert fired == [], "probe 不该发 inputs_changed（它发 probe_clicked）"
 
 
 def test_edit_ticket_button_locked_while_running(qapp) -> None:

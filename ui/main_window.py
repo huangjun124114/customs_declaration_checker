@@ -53,7 +53,7 @@ __all__ = ["MainWindow"]
 APP_TITLE = "报关申报要素自动校验工具"
 #: ⚠️ 与 ``main.py::APP_VERSION`` 必须同步（ui 层不 import 入口模块，故此处独立定义；
 #: v0.3.0 曾漏更，留下 0.2.0 的陈旧值 —— 改版本号时两处一起改）
-APP_VERSION = "0.3.1"
+APP_VERSION = "0.3.7"
 
 #: 「人工复核工作台」页签索引（v0.2.0 点 4：初始隐藏，跑完 / 有结果后显示）
 _WORKBENCH_TAB_INDEX = 1
@@ -120,8 +120,11 @@ class MainWindow(QMainWindow):
 
         # 文件菜单
         file_menu = menubar.addMenu("文件(&F)")
-        export_action = QAction("保存本轮留痕并重导出(&E)", self)
-        export_action.setStatusTip("把人工复核结果写回并覆盖三产物（成果产出）")
+        export_action = QAction("保存留痕并导出复核后版本(&E)", self)
+        export_action.setStatusTip(
+            "生成「复核后」版本（汇总表 / 复核清单 / JSON）；"
+            "原系统跑批产物**不被覆盖**（v0.3.7 需求 4）"
+        )
         export_action.triggered.connect(self._on_export_reviewed)
         file_menu.addAction(export_action)
         file_menu.addSeparator()
@@ -410,6 +413,10 @@ class MainWindow(QMainWindow):
         self.progress_panel.reset_progress()
         self.summary_panel.clear()
         self.session.clear()
+        # v0.3.7：新一轮 = 新结果集 → 内存中的复核改判一并清空（**磁盘留痕保留**，
+        # 否则上一轮的 override 会以"幽灵改判"的形式套到新结果上）
+        if self._review_store is not None:
+            self._review_store.reset()
         self.workbench.set_session(self.session)
         self._update_workbench_tab()
 
@@ -503,8 +510,65 @@ class MainWindow(QMainWindow):
             self._review_store = ReviewStore(self.session, process_dir, allowed_root=process_dir)
         return self._review_store
 
+    def _current_exporter(self) -> Any:
+        """按当前输入构造导出器（成果产出 / 过程产出都就绪才返回，否则 ``None``）。"""
+        inputs = self._current_inputs()
+        result_dir = inputs.get("result_dir", "")
+        process_dir = inputs.get("process_dir", "")
+        if not result_dir or not process_dir:
+            return None
+        from core.result_exporter import ResultExporter
+
+        return ResultExporter(
+            result_dir,
+            process_dir,
+            allowed_result_root=result_dir,
+            allowed_process_root=process_dir,
+        )
+
+    def _persist_review(self, store: ReviewStore, *, silent: bool = False) -> bool:
+        """【v0.3.7 需求 4】**保存复核即落盘**：留痕 + 复核后版本（含 Excel / CSV / JSON）。
+
+        ⚠️ **不覆盖系统原始产物** —— ``ReviewStore.persist`` 全部走 ``_复核后`` 另存文件。
+
+        Args:
+            store: 复核存储。
+            silent: ``True`` 时不弹窗（用于「导出」按钮路径，那里已由调用方统一提示）。
+
+        Returns:
+            ``True`` 表示四类文件均已落盘。
+        """
+        exporter = self._current_exporter()
+        if exporter is None:
+            self.log.warn("成果/过程产出目录未就绪，复核结果暂只保留在内存")
+            return False
+        try:
+            artifacts = store.persist(exporter)
+        except Exception as exc:  # noqa: BLE001 - 落盘失败必须提示而非静默/闪退
+            from infra.errors import user_message_of
+
+            message = user_message_of(exc)
+            self.log.error("复核落盘失败：%s", exc)
+            if not silent:
+                QMessageBox.warning(self, "复核落盘失败", message)
+            else:
+                self.statusBar().showMessage(f"复核落盘失败：{message}", 12000)
+            return False
+        self.summary_panel.show_artifacts(
+            {
+                "summary_reviewed": str(artifacts["summary_reviewed"]),
+                "review_reviewed": str(artifacts["review_reviewed"]),
+                "reviewed_json": str(artifacts["reviewed_json"]),
+            }
+        )
+        return True
+
     def _on_verdict_applied(self, key: str, verdict: str, note: str, mark_missing: bool) -> None:
-        """应用一次重判（幂等，写回结果集 + 刷新第三区）。"""
+        """应用一次重判并**立即落盘**（幂等，写回结果集 + 刷新第三区）。
+
+        v0.3.7 需求 4：点「保存重判」即落盘 —— 不再需要额外点一次「重导出」，
+        避免"复核了半天没保存"的现场事故。
+        """
         store = self._ensure_review_store()
         if store is None:
             self.statusBar().showMessage("请先填写过程产出目录后再复核", 8000)
@@ -523,54 +587,57 @@ class MainWindow(QMainWindow):
             total=len(self.session.results()),
         )
         self.workbench.reload()
-        self.statusBar().showMessage(
-            f"已重判：{key} → {verdict}" + ("（已标记待补图）" if mark_missing else ""), 8000
-        )
+        persisted = self._persist_review(store)
+        message = f"已重判：{key} → {verdict}" + ("（已标记待补图）" if mark_missing else "")
+        message += "；已落盘复核后版本（原系统产物未改动）" if persisted else "（落盘未完成，见提示）"
+        self.statusBar().showMessage(message, 12000)
 
     def _on_export_reviewed(self) -> None:
-        """保存本轮留痕 + 覆盖三产物（成果产出）+ 另存复核后 JSON。"""
+        """「保存留痕并导出复核后版本」：落盘复核后版本 + **绝不覆盖**系统原始产物。"""
         store = self._ensure_review_store()
         if store is None:
-            QMessageBox.information(self, "无法重导出", "请先填写过程产出目录。")
+            QMessageBox.information(self, "无法导出", "请先填写过程产出目录。")
             return
         if not self.session.results():
-            QMessageBox.information(self, "无法重导出", "当前没有校验结果可导出。")
+            QMessageBox.information(self, "无法导出", "当前没有校验结果可导出。")
+            return
+        if not store.has_overrides():
+            QMessageBox.information(
+                self,
+                "尚未复核",
+                "当前没有人工重判记录。\n"
+                "复核后版本用于承载「人工改判」的留痕，请先在工作台完成至少一次复核再导出。",
+            )
             return
 
-        inputs = self._current_inputs()
-        ticket = inputs["ticket_no"] or self.session.ticket_no or "UNKNOWN"
-        try:
-            from core.result_exporter import ResultExporter
+        exporter = self._current_exporter()
+        if exporter is None:
+            QMessageBox.information(self, "无法导出", "请先填写成果产出与过程产出目录。")
+            return
 
-            exporter = ResultExporter(
-                inputs["result_dir"],
-                inputs["process_dir"],
-                allowed_result_root=inputs["result_dir"],
-                allowed_process_root=inputs["process_dir"],
-            )
-            round_path = store.save_round()
-            artifacts = exporter.export_all(list(self.session.results()), ticket)
-            reviewed_path = store.save_reviewed_json(exporter)
+        try:
+            artifacts = store.persist(exporter)
         except Exception as exc:  # noqa: BLE001 - 导出失败须明确提示
             from infra.errors import user_message_of
 
-            QMessageBox.critical(self, "重导出失败", user_message_of(exc))
+            QMessageBox.critical(self, "导出失败", user_message_of(exc))
             return
 
         self.summary_panel.show_artifacts(
             {
-                "summary": str(artifacts["summary"]),
-                "review_csv": str(artifacts["review"]),
-                "detail_json": str(artifacts["detail"]),
+                "summary_reviewed": str(artifacts["summary_reviewed"]),
+                "review_reviewed": str(artifacts["review_reviewed"]),
+                "reviewed_json": str(artifacts["reviewed_json"]),
             }
         )
         QMessageBox.information(
             self,
-            "重导出完成",
-            "已保存本轮留痕并覆盖三产物：\n"
-            f"· 留痕：{round_path}\n"
-            f"· 复核后 JSON：{reviewed_path}\n"
-            f"· 汇总表：{artifacts['summary']}",
+            "复核后版本已导出",
+            "已生成「复核后」版本，**原系统产物未被覆盖**：\n"
+            f"· 复核后汇总表：{artifacts['summary_reviewed']}\n"
+            f"· 复核后复核清单：{artifacts['review_reviewed']}\n"
+            f"· 复核后 JSON：{artifacts['reviewed_json']}\n"
+            f"· 本轮留痕：{artifacts['round']}",
         )
 
     # ─────────────────────── 槽函数 ───────────────────────

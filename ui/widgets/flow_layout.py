@@ -8,6 +8,8 @@ PySide6 **没有内置**流式布局；本模块按 Qt 官方 ``flowlayout`` 示
     :meth:`FlowLayout.heightForWidth` 精确分配高度；
   * 同时提供 ``count`` / ``itemAt`` / ``takeAt``，使其与 ``QLayout`` 的
     通用清空逻辑（``takeAt(0)`` 循环 + ``widget().deleteLater()``）兼容。
+    ⚠️ 调用方清空后须 **显式 ``hide()`` + ``setParent(None)``** —— 单靠
+    ``deleteLater()`` 是异步的，控件会作为残影继续渲染（v0.3.7 实测踩到）。
 
 用途：复核工作台的「无键值对散行」标签卡（v0.2.0 点 9.4 副区）与「证据图号」
 切换按钮区 —— 图/行数不固定时避免单行横向溢出。

@@ -434,7 +434,7 @@ class TestWholeMachineBrand:
         assert result.verdict == Verdict.FAIL
 
     def test_whole_machine_note_present(self, engine: JudgeEngine) -> None:
-        """命中整机品牌上下文时差异备注应含"整机品牌"说明。"""
+        """命中整机品牌上下文时判定依据应含"整机品牌"说明。"""
         record = make_record(
             brand="baori",
             model="A7A01G",

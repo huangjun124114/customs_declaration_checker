@@ -55,6 +55,8 @@ class ReviewOverride:
         round_index: 所属轮次（从 1 起）。
         timestamp: 改判时间（ISO 8601）。
         mark_missing: 是否「标记待补图」（🔵 缺图类的专用动作，Q7）。
+        original_verdict: 【v0.3.7】**本次改判前**该条的系统判定值
+            （``Verdict.value``；口径见 :attr:`core.models.CheckResult.original_verdict`）。
     """
 
     key: str = ""
@@ -63,6 +65,7 @@ class ReviewOverride:
     round_index: int = 1
     timestamp: str = ""
     mark_missing: bool = False
+    original_verdict: str = ""
 
     def to_dict(self) -> dict[str, object]:
         """序列化为字典。"""
@@ -74,7 +77,18 @@ class ReviewOverride:
             "round_index": self.round_index,
             "timestamp": self.timestamp,
             "mark_missing": self.mark_missing,
+            "original_verdict": self.original_verdict,
+            "original_verdict_text": self._original_text(),
         }
+
+    def _original_text(self) -> str:
+        """把 ``original_verdict``（值串）转成口径字符串（空串保持空串）。"""
+        if not self.original_verdict:
+            return ""
+        try:
+            return VERDICT_TEXT.get(Verdict(self.original_verdict), self.original_verdict)
+        except ValueError:  # 未知取值 → 原样回显，不抛
+            return self.original_verdict
 
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> ReviewOverride:
@@ -92,6 +106,7 @@ class ReviewOverride:
             round_index=int(data.get("round_index", 1) or 1),
             timestamp=str(data.get("timestamp", "") or ""),
             mark_missing=bool(data.get("mark_missing", False)),
+            original_verdict=str(data.get("original_verdict", "") or ""),
         )
 
 
@@ -159,6 +174,14 @@ class ReviewStore:
             raise KeyError(f"结果集中不存在该记录：{normalized}")
 
         resolved = verdict if isinstance(verdict, Verdict) else Verdict(str(verdict))
+        # 【v0.3.7 需求 4】「重判结果不覆盖原系统产生的结果」：
+        # 首次改判时把**系统判定**原样记下；后续改判**不得**改写它
+        # （否则 original 会退化成"上一次的重判值"，可追溯性失真）。
+        original: Verdict | None = getattr(result, "original_verdict", None)
+        if original is None:
+            original = result.verdict
+            result.original_verdict = original
+
         override = ReviewOverride(
             key=normalized,
             verdict=resolved,
@@ -166,16 +189,19 @@ class ReviewStore:
             round_index=self._round_index + 1,
             timestamp=_now_iso(),
             mark_missing=bool(mark_missing),
+            original_verdict=original.value,
         )
         # 幂等：同 key 覆盖
         self._overrides[normalized] = override
 
-        # 回写结果集（verdict / 备注 / 已复核标记）
+        # 回写结果集（verdict / 备注 / 已复核标记 / **原系统判定留痕**）
         result.verdict = resolved
         result.reviewer_note = override.note
         result.manually_reviewed = True
+        result.reviewed_at = override.timestamp
         self._log.info(
             f"改判：{normalized} → {VERDICT_TEXT.get(resolved, resolved.value)}"
+            + f"（原系统判定：{VERDICT_TEXT.get(original, original.value)}）"
             + (f"（备注：{override.note}）" if override.note else "")
         )
         return override
@@ -267,6 +293,52 @@ class ReviewStore:
         self._write_json(target, payload)
         self._log.info(f"复核后 JSON 已另存（原始累积版保留不动）：{target}")
         return target
+
+    # ══════════════════════════════════════════════════════════
+    #  保存复核即落盘（v0.3.7 需求 4）
+    # ══════════════════════════════════════════════════════════
+
+    def persist(self, exporter: ResultExporter) -> dict[str, Path]:
+        """**保存复核即落盘**：一次调用把「留痕 + 复核后版本」全部写到磁盘。
+
+        四件事（顺序固定，任一步失败即上抛，由 UI 明确提示而非静默）：
+
+          1. ``复核留痕/review_round_N.json`` —— 本轮留痕（**每保存一次即一轮**，
+             append-only，便于回溯"什么时候改过哪几条"）；
+          2. ``{票号}_复核后.json`` —— 复核后完整结果集（原始累积版**不动**，Q6）；
+          3. ``校验汇总表_{票号}_复核后.xlsx`` —— 复核后汇总表
+             （13 列 + 「人工复核 / 原系统判定」两列标识）；
+          4. ``{票号}_待人工复核清单_复核后.csv`` —— 复核后复核清单（同追加两列）。
+
+        ⚠️ **红线：绝不覆盖系统原始产物**。全部落点都是另存文件
+        （``_复核后`` 中缀），原始 ``校验汇总表_{票号}.xlsx`` /
+        ``校验详细日志_{票号}_累积.json`` 保持系统跑批时那一刻的内容不变 ——
+        复核人可随时对照"系统判成什么 / 人工改成什么"。
+
+        Args:
+            exporter: 结果导出器（提供成果产出 / 过程产出目录与越界断言）。
+
+        Returns:
+            ``{"round": Path, "reviewed_json": Path,
+            "summary_reviewed": Path, "review_reviewed": Path}``。
+        """
+        round_path = self.save_round()
+        reviewed_json = self.save_reviewed_json(exporter)
+        artifacts = exporter.export_reviewed_all(
+            self._session.results(), self._session.ticket_no
+        )
+        self._log.info(
+            "复核已落盘（原系统产物未改动）："
+            f"汇总表={artifacts['summary_reviewed']}｜"
+            f"复核清单={artifacts['review_reviewed']}｜"
+            f"复核后 JSON={reviewed_json}"
+        )
+        return {
+            "round": round_path,
+            "reviewed_json": reviewed_json,
+            "summary_reviewed": artifacts["summary_reviewed"],
+            "review_reviewed": artifacts["review_reviewed"],
+        }
 
     # ══════════════════════════════════════════════════════════
     #  重置

@@ -182,7 +182,7 @@ def check_smoke(rep: Report, app_dir: Path | None, enabled: bool) -> dict[str, s
     """跑冒烟子命令，返回 ``{flag: stderr 全文}`` 供后续断言复用。
 
     ⚠️ 日志走 **stderr**（``logging`` 默认流），不要因为"stderr 有内容"就判失败 ——
-    冻结态那行 ``… v0.3.1 启动`` 正是最有力的版本证据。
+    冻结态那行 ``… v{当前 APP_VERSION} 启动`` 正是最有力的版本证据。
     """
     captured: dict[str, str] = {}
     rep.add("【3】冻结态冒烟")

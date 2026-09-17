@@ -5,13 +5,19 @@
 
   * **上**：**状态标签**（全部 / 成功 / 待复核 / 缺图 / 失败，带数量与灯色）
     + **模糊搜索**（出货单号 / 订单号 / 物料编号，大小写不敏感子串包含）；
-  * **左**：记录**表格**（订单号 / 物料编号 / 核验结果；选中行整行高亮）；
-  * **中**：:class:`ui.widgets.image_viewer.ImageViewer`（🔵 缺图时**不加载图**，只显提示）；
+  * **左**：记录**表格**（订单号 / 物料编号 / 核验结果 / **复核**；选中行整行高亮）；
+  * **中**：:class:`ui.widgets.image_viewer.ImageViewer`（🔵 缺图时**不加载图**，只显提示）
+    —— **v0.3.7 需求 1**：证据图切换按钮从右侧证据卡**下沉到图片正下方**（切换条常驻
+    可见），并新增「◀ 上一张 / 下一张 ▶」左右切换；
   * **右**：:class:`ui.widgets.workbench_card.WorkbenchCard`（三列判定链路 + 散行 OCR + 重判 + 备注）；
-  * **底部**： 「保存本轮留痕并重导出」（``复核留痕/review_round_N.json`` + 覆盖 ``*_复核后.json``）。
+  * **底部**： 「保存本轮留痕并重导出」（``复核留痕/review_round_N.json`` + **复核后版本**）。
 
 **v0.3.0 需求 3 / 4**：列表 → 表格、状态标签带数量、三字段模糊搜索、
 选中行高亮并**同步**中间图片与右侧证据卡。
+
+**v0.3.7 需求 2 / 3**：**命中申报要素**的图片，其切换按钮标红、且在看图时
+图片右上角叠加红色五角星。命中判据由模块级纯函数 :func:`hit_image_paths`
+从引擎回吐的 ``CheckResult.token_matches`` 读取 —— **UI 侧不重算任何判定**。
 
 过滤管线：``全部结果 → 状态标签 → 模糊搜索``，任一步为空则表格留空并清空中/右区。
 
@@ -40,13 +46,13 @@ from PySide6.QtWidgets import (
 )
 
 from app.session import AppSession
-from core.constants import REVIEW_VERDICTS, VERDICT_LABELS
-from core.models import CheckResult, Verdict
-from ui.styles.palette import VERDICT_COLORS, Palette
+from core.constants import REVIEW_VERDICTS, VERDICT_LABELS, VERDICT_TEXT
+from core.models import CheckResult, ImageEvidence, Verdict
+from ui.styles.palette import BREAKPOINT_RED, VERDICT_COLORS, Palette
 from ui.widgets.image_viewer import ImageViewer
 from ui.widgets.workbench_card import WorkbenchCard
 
-__all__ = ["ReviewWorkbench"]
+__all__ = ["hit_image_paths", "ReviewWorkbench"]
 
 #: 「全部」标签的取值（与 Verdict.value 区分）
 _STATUS_ALL = "all"
@@ -82,6 +88,78 @@ _TABLE_QSS = (
     "QTableWidget::item{padding:3px 6px;}"
     "QTableWidget::item:selected{background:#D6E4FF;color:#1A1A1A;font-weight:bold;}"
 )
+
+#: 记录表格列名（v0.3.7：新增「复核」列 —— 标识该条记录是**人工重判**的）
+_TABLE_COLUMNS: tuple[str, ...] = ("订单号", "物料编号", "核验结果", "复核")
+
+
+def _evidences(result: CheckResult) -> list[ImageEvidence]:
+    """返回该记录的证据图列表（``evidence_images`` 优先，回退 ``record.evidences``）。"""
+    evidences = list(getattr(result, "evidence_images", []) or [])
+    if not evidences and getattr(result, "record", None) is not None:
+        evidences = list(getattr(result.record, "evidences", []) or [])
+    return evidences
+
+
+def hit_image_paths(result: CheckResult) -> set[str]:
+    """返回该记录中**命中申报要素**的图片路径集合（v0.3.7 需求 2 / 3）。
+
+    命中判据**只读引擎回吐的取证结果**，UI 侧不重算：
+
+      * :attr:`core.token_matcher.TokenMatch.hit`（``EXACT`` / ``FUZZY``）→
+        其 ``images`` 图号对应的图，即"申报值以完整分词出现在该图中"；
+      * ``TokenMatch.none_marker`` 非空 → ``none_marker_image`` 对应的图，
+        即"图内显式标注了『无品牌 / 无型号』"（口径 v0.3.2 下判 ✅ 的直接证据）。
+
+    Args:
+        result: 校验结果。
+
+    Returns:
+        命中图片的路径集合；图号找不到对应文件时**忽略该图号**（不臆造路径）。
+    """
+    seq_to_path: dict[int, str] = {}
+    for evidence in _evidences(result):
+        if not getattr(evidence, "exists", False):
+            continue
+        path = str(getattr(evidence, "image_path", "") or "")
+        if not path:
+            continue
+        try:
+            seq = int(getattr(evidence, "seq", 0) or 0)
+        except (TypeError, ValueError):
+            seq = 0
+        if seq > 0:
+            seq_to_path.setdefault(seq, path)
+
+    hits: set[str] = set()
+    for match in getattr(result, "token_matches", []) or []:
+        target_seqs: list[object] = []
+        if getattr(match, "hit", False):
+            target_seqs.extend(getattr(match, "images", []) or [])
+        if str(getattr(match, "none_marker", "") or "").strip():
+            target_seqs.append(getattr(match, "none_marker_image", 0))
+        for seq in target_seqs:
+            try:
+                hits.add(seq_to_path[int(seq)])
+            except (KeyError, TypeError, ValueError):
+                continue
+    return hits
+
+
+def _evidence_items(result: CheckResult) -> list[tuple[int, str, bool]]:
+    """构造切换条数据 ``[(seq, path, is_hit), ...]``（只含存在且可预览的图）。"""
+    hits = hit_image_paths(result)
+    items: list[tuple[int, str, bool]] = []
+    for evidence in _evidences(result):
+        if not getattr(evidence, "exists", False):
+            continue
+        path = str(getattr(evidence, "image_path", ""))
+        try:
+            seq = int(getattr(evidence, "seq", 0) or 0)
+        except (TypeError, ValueError):
+            seq = 0
+        items.append((seq, path, path in hits))
+    return items
 
 
 class ReviewWorkbench(QFrame):
@@ -164,30 +242,34 @@ class ReviewWorkbench(QFrame):
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(4)
         left_layout.addWidget(QLabel("记录：", self))
-        self.record_table = QTableWidget(0, 3, self)
-        self.record_table.setHorizontalHeaderLabels(["订单号", "物料编号", "核验结果"])
+        self.record_table = QTableWidget(0, len(_TABLE_COLUMNS), self)
+        self.record_table.setHorizontalHeaderLabels(list(_TABLE_COLUMNS))
         self.record_table.verticalHeader().setVisible(False)
         self.record_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.record_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.record_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.record_table.setAlternatingRowColors(False)
         self.record_table.setShowGrid(True)
-        # 三列并排：料号最长 17 字 + 核验结果 5 字 → 太窄会把结果列挤成「…」（实测踩坑）
-        self.record_table.setMinimumWidth(400)
+        # 四列并排：料号最长 17 字 + 核验结果 5 字 + 复核标识 4 字 → 太窄会把结果列挤成「…」
+        # （实测踩坑）。故最小宽相应放大，末列 Stretch 吃掉余量。
+        self.record_table.setMinimumWidth(440)
         self.record_table.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.record_table.setStyleSheet(_TABLE_QSS)
         header_view = self.record_table.horizontalHeader()
-        header_view.setMinimumSectionSize(72)
+        header_view.setMinimumSectionSize(64)
         header_view.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         header_view.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         header_view.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        header_view.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         self.record_table.currentCellChanged.connect(self._on_row_changed)
         left_layout.addWidget(self.record_table, 1)
         splitter.addWidget(left)
 
-        # ── 中：图片查看器 ──
+        # ── 中：图片查看器（v0.3.7：证据图切换条已下沉到图片正下方）──
         self.image_viewer = ImageViewer(self)
         self.image_viewer.setMinimumWidth(320)
+        # 换图**唯一入口**：切换条（含左右翻页）→ 本工作台统一同步左图与右侧证据卡
+        self.image_viewer.image_requested.connect(self._on_image_requested)
         splitter.addWidget(self.image_viewer)
 
         # ── 右：证据 / 重判卡（需求 5 三列链路需要更宽，否则判定值被裁切）──
@@ -205,11 +287,13 @@ class ReviewWorkbench(QFrame):
         # 底部操作行
         bottom = QHBoxLayout()
         self.hint_label = QLabel(
-            "重判为**幂等**操作：以最终一次为准；重导出会反映最终判定。", self
+            "重判为**幂等**操作：以最终一次为准；**保存即落盘**"
+            "（生成「复核后」版本，原系统跑批结果**不被覆盖**）。",
+            self,
         )
         self.hint_label.setObjectName("reviewHint")
         bottom.addWidget(self.hint_label, 1)
-        self.btn_export = QPushButton("保存本轮留痕并重导出", self)
+        self.btn_export = QPushButton("保存留痕并导出复核后版本", self)
         self.btn_export.setObjectName("primaryButton")
         self.btn_export.clicked.connect(self.export_requested.emit)
         bottom.addWidget(self.btn_export)
@@ -349,6 +433,8 @@ class ReviewWorkbench(QFrame):
             self._select_row(0)
         else:
             self.card.clear()
+            # v0.3.7：空态下切换条一并清空（否则残留上一条记录的图号按钮）
+            self.image_viewer.set_images([])
             self.image_viewer.show_message(self._empty_message())
             self.image_viewer.setEnabled(True)
 
@@ -359,25 +445,39 @@ class ReviewWorkbench(QFrame):
         return "（无匹配记录）"
 
     def _append_row(self, result: CheckResult) -> None:
-        """追加一条记录行（``订单号 | 物料编号 | 核验结果``）。"""
+        """追加一条记录行（``订单号 | 物料编号 | 核验结果 | 复核``）。"""
         record = getattr(result, "record", None)
         order = (getattr(record, "order_no", "") if record is not None else "") or "-"
         part = (getattr(record, "part_no", "") if record is not None else "") or "-"
         verdict = result.verdict
         label = VERDICT_LABELS.get(verdict, getattr(verdict, "value", ""))
         reviewed = bool(getattr(result, "manually_reviewed", False))
-        verdict_text = f"{'✔ ' if reviewed else ''}● {label}"
+        # v0.3.7 需求 4：「复核」列**独立标识**该条是人工重判的
+        # （不再只靠核验结果列里一个易被忽略的 ✔ 前缀）
+        mark_text = result.manual_review_mark()
 
         row = self.record_table.rowCount()
         self.record_table.insertRow(row)
-        cells = (str(order), str(part), verdict_text)
+        cells = (str(order), str(part), f"● {label}", mark_text)
         for col, text in enumerate(cells):
             item = QTableWidgetItem(text)
-            item.setToolTip(f"{result.key}\n{VERDICT_LABELS.get(verdict, '')}")
+            tip = f"{result.key}\n{VERDICT_TEXT.get(verdict, '')}"
+            if reviewed:
+                tip += f"\n\n人工重判：原系统判定为「{result.original_verdict_text()}」"
+                note = str(getattr(result, "reviewer_note", "") or "").strip()
+                if note:
+                    tip += f"\n复核备注：{note}"
+            item.setToolTip(tip)
             if col == 2:
                 item.setForeground(
                     QColor(VERDICT_COLORS.get(getattr(verdict, "value", ""), Palette.TEXT))
                 )
+            elif col == 3 and reviewed:
+                # 红色 + 加粗：一眼可见"这条被人工改过"
+                item.setForeground(QColor(BREAKPOINT_RED))
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
             self.record_table.setItem(row, col, item)
         # key 挂在第一列（供选中同步与测试查询）
         first = self.record_table.item(row, 0)
@@ -412,10 +512,14 @@ class ReviewWorkbench(QFrame):
         self._show_first_available_image(result)
 
     def _show_first_available_image(self, result: CheckResult) -> None:
-        """加载第一条「存在」的证据图；🔵 缺图时**不加载**、只显提示。"""
-        evidences = list(getattr(result, "evidence_images", []) or [])
-        if not evidences and getattr(result, "record", None) is not None:
-            evidences = list(getattr(result.record, "evidences", []) or [])
+        """装载该记录的证据图切换条，并展示第一条「存在」的图。
+
+        切换条数据一次装满（含**命中标红**信息）；🔵 缺图时**不加载图**、只显提示。
+        """
+        # v0.3.7 需求 1：切换条**先于** 图片装载 —— 消息态下也保持按钮/占位一致
+        self.image_viewer.set_images(_evidence_items(result))
+
+        evidences = _evidences(result)
         if not evidences:
             self.image_viewer.show_message("🔵 缺图：该记录无图片证据。\n请「标记待补图」并填写备注。")
             return
@@ -438,14 +542,32 @@ class ReviewWorkbench(QFrame):
         # 点 9.2：卡片默认展示「第一条存在图」；切换查看器图片时同步卡片当前图
         first_path = str(getattr(first_exists, "image_path", ""))
         self.card.set_current_image(first_path)
-        self.image_viewer.load(first_path)
+        self._load_image(first_path)
+
+    def _load_image(self, path: str) -> None:
+        """换图**唯一落地点**：左侧查看器加载 + 切换条高亮/五角星同步。
+
+        ``card.set_current_image`` 由调用方负责 —— 让"左图"与"右卡"各只被写一次，
+        避免两处互相触发导致的抖动。
+        """
+        if not path:
+            return
+        self.image_viewer.load(path)
+        self.image_viewer.set_current_image(path)
+
+    def _on_image_requested(self, path: str) -> None:
+        """切换条点选 / 左右翻页（v0.3.7 需求 1）→ 同步左图与右侧证据卡。"""
+        if not path:
+            return
+        self.card.set_current_image(path)
+        self._load_image(path)
 
     def _on_evidence_selected(self, path: str) -> None:
-        """点击图号按钮 → 切换左侧查看器 + 同步右侧卡片当前图（点 9.2）。"""
+        """点击图号按钮 / 弹窗「上一张 / 下一张」→ 切换左侧查看器 + 同步右侧卡片（点 9.2）。"""
         if path:
             # 右侧证据卡只展示「当前选中图」的 OCR（修复原「整条拼接」缺陷）
             self.card.set_current_image(path)
-            self.image_viewer.load(path)
+            self._load_image(path)
 
     def _on_verdict_changed(self, key: str, verdict: str, note: str, mark_missing: bool) -> None:
         """卡片保存重判 → 转发信号（真正写回由主窗口的 ReviewStore 完成）。"""

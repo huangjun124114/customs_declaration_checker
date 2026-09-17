@@ -31,6 +31,19 @@
   * ``parse()`` 返回的 :class:`core.models.ParsedElement` **只有** ``brand`` /
     ``model`` 两个识别结果（``fields`` 仅保留原始 ``(键, 值)`` 对供追溯，不参与判定）。
 
+**分词原则（v0.3.5，用户裁定 2026-09-17）**：申报要素原文存在"多个要素值以空格连写"
+的书写形态（``rules/separators.yaml`` 里 ``、``/``;``/``；``/``/``/``|`` 是分隔符，
+**空格不是**）。两条不可动摇的分词规则:
+
+  * **「无品牌 / 无型号」是一个完整分词** —— 连写时不得把邻座要素的取值带进本要素。
+    如 ``材质：纸制|形状：L形,条状|规格：1220mm*(50mm+50mm)*5mm 无品牌``
+    → 品牌为「无」，**不是** ``1220mm*(50mm+50mm)*5mm 无``。
+  * **品牌和型号不会出现中英文混合词** —— 中英混排的候选串**不是一个分词**，
+    一律不采信（见 :func:`is_mixed_cjk_ascii`）。
+
+  ⇒ **空格即分词边界**：后缀形态（``X品牌`` / ``X牌``）取紧邻后缀词的**最后一个**
+  分词（见 :func:`narrow_suffix_token`）。
+
 依赖：``core.models`` / ``core.constants`` / ``core.rule_repository`` / ``infra.*``
 （**不依赖 PySide6**）。
 """
@@ -52,6 +65,8 @@ __all__ = [
     "normalize_separators",
     "clean_model_tail",
     "is_blacklisted",
+    "is_mixed_cjk_ascii",
+    "narrow_suffix_token",
     "split_fields",
 ]
 
@@ -66,6 +81,79 @@ _INTERNAL_COLON = ":"
 _BRAND_TOKEN_RE: re.Pattern[str] = re.compile(
     r"^(?:[A-Za-z0-9][A-Za-z0-9\-\.]{0,29}|[\u4e00-\u9fa5]{2,30})$"
 )
+
+#: 汉字（CJK 统一汉字基本区）—— 供「中英混排」判定使用
+_CJK_RE: re.Pattern[str] = re.compile(r"[\u4e00-\u9fa5]")
+
+#: ASCII 字母 —— 供「中英混排」判定使用
+_ASCII_LETTER_RE: re.Pattern[str] = re.compile(r"[A-Za-z]")
+
+
+def is_mixed_cjk_ascii(text: str) -> bool:
+    """判断文本是否**中英混排**（同时含汉字与 ASCII 字母）。
+
+    **用户原则（口径 v0.3.5，2026-09-17 现场裁定）**：
+
+        品牌和型号不会出现中英文混合词。
+
+    该原则在解析侧作为**分词识别规则**使用 —— 一个**分词**内部不会中英混排。
+    中英混排的候选串只可能是「别的要素值 + 本要素值」被**粘连**的产物：
+    ``rules/separators.yaml`` 只把 ``、``/``;``/``；``/``/``/``|`` 归一化为分隔符，
+    **空格不是分隔符**，故"要素值以空格连写"的原文会整段到达要素提取::
+
+        材质：纸制|形状：L形,条状|规格：1220mm*(50mm+50mm)*5mm 无品牌
+                                                └──── 规格的值 ────┘└品牌值┘
+        候选值 = ``1220mm*(50mm+50mm)*5mm 无`` ← 中英混排 → **不是一个品牌分词** → 不采信
+
+    ⚠️ 只判「汉字 + ASCII **字母**」，**不**含数字：``L形`` 这类「字母+汉字」仍算混排；
+    而纯数字候选（``1220``）不被本函数否决，交由黑名单/正则形态处理 ——
+    **避免过度否决**（宁可交给人工看图，也不误伤）。
+
+    Args:
+        text: 待判文本。
+
+    Returns:
+        ``True`` 表示同时含汉字与 ASCII 字母（中英混排）。
+    """
+    raw = "" if text is None else str(text)
+    return bool(_CJK_RE.search(raw)) and bool(_ASCII_LETTER_RE.search(raw))
+
+
+def narrow_suffix_token(prefix: str) -> str:
+    """把「X品牌 / X牌」里的 ``X`` 收窄为**紧邻后缀词的最后一个分词**（v0.3.5）。
+
+    「品牌 / 牌」**后缀形态**的语义是：紧挨着后缀词之前的**那个词**就是品牌值
+    （``宇同品牌`` → ``宇同``）。但申报要素原文存在"要素值以空格连写"形态
+    （``rules/separators.yaml`` 里**空格不是分隔符**），前缀会被**别的要素**的取值污染::
+
+        材质：纸制|形状：L形,条状|规格：1220mm*(50mm+50mm)*5mm 无品牌
+                                            └──── 规格的值 ────┘└品牌值┘
+        split("品牌")[0] = ``1220mm*(50mm+50mm)*5mm 无``  ← 整段当品牌 → 脏值（实测本缺陷）
+
+    ⇒ **空格即分词边界**（用户裁定 v0.3.5：「``无品牌`` 应该是一个完整分词，
+    而 ``1220mm*(50mm+50mm)*5mm`` 应该是另外一个分词」），品牌值取**最后一个**
+    空白分隔段（``无``）→ 判「无」。
+
+    例外（**防误伤**，不虚高红线）：整段 ``prefix`` 全为 ASCII 字符时
+    （``NEW BALANCE`` / ``DAEWOO ELECTRONICS`` 这类**含空格的合法英文品牌名**）
+    **原样返回**，不按空格切分 —— 这类书写形态下空格是**品牌名内部**的字符，
+    不是要素之间的分词边界。
+
+    Args:
+        prefix: 后缀词之前的部分（可含前后空白）。
+
+    Returns:
+        收窄后的候选值；无空白或纯 ASCII 多词时原样返回（已 strip）。
+    """
+    text = (prefix or "").strip()
+    if not text:
+        return ""
+    segments = text.split()
+    if len(segments) <= 1:
+        return text
+    if text.isascii():
+        return text
+    return segments[-1].strip()
 
 #: 型号清洗的脏尾分界正则缓存键（按脏尾字符集哈希，避免重复编译）
 _TAIL_CACHE: dict[tuple[str, ...], re.Pattern[str]] = {}
@@ -487,7 +575,15 @@ class ElementParser:
                 if self._is_non_value_key(key):
                     continue
                 if "品牌" in key or "品牌" in value:
-                    candidates.append((value, f"{key}:{value}"))
+                    # ⚠️ v0.3.4 缺陷修复：品牌字样落在**键**上、而「值」是**别的要素**
+                    #    的取值时，候选必须取**键**侧。典型来源是「元素值连写」：
+                    #    ``无品牌 无商业价值 用途:电视机用`` → 空格连写后按冒号切成
+                    #    键=``无品牌 无商业价值 用途``、值=``电视机用`` —— 取「值」会把
+                    #    另一个要素的取值当作品牌（实测产出 ``电视机用``）。
+                    #    键 == 值时（``无品牌 无商业价值``）两侧等价，行为不变。
+                    candidates.append(
+                        (self._brand_candidate_side(key, value), f"{key}:{value}")
+                    )
 
         for value, context in candidates:
             brand = self._match_brand_value(value, context)
@@ -534,6 +630,12 @@ class ElementParser:
         #    ⚠️ 排除「型号类型」这类非值类要素字段（口径 v0.3.1）
         for key, value in pairs:
             if "型号" in key and not self._is_non_value_key(key):
+                # ⚠️ v0.3.4 缺陷修复（与品牌侧 ➋ 对称）：键侧已写明「无型号」本体时
+                #    （``无型号 用途:电视机用`` → 键=``无型号 用途``、值=``电视机用``），
+                #    该要素为「无」→ **绝不**取「值」侧（那是别的要素的取值，实测产出
+                #    ``电视机用``）。连写形态下键==值时同样立即判空。
+                if key.strip().startswith("无型号"):
+                    return ""
                 cleaned = self._extract_model_from_value(value)
                 if cleaned:
                     return cleaned
@@ -573,6 +675,11 @@ class ElementParser:
         # 形态 C：``无型号、用途…`` —— 「无型号」后跟分隔符，说明型号为空
         if candidate.startswith("无型号"):
             return ""
+        # 形态 D（v0.3.4 缺陷修复，与品牌侧 ➋ 对称）：值以「无」类取值开头且有边界隔断
+        # （``型号:无 长度:150MM`` → 值 = ``无 长度:150MM``，``长度`` 是**别的要素**）
+        # → 该要素为「无」，绝不把后续要素的取值带进型号值。
+        if self._starts_with_none_token(candidate):
+            return ""
         if candidate.startswith("型号"):
             candidate = candidate[len("型号"):].strip()
 
@@ -581,6 +688,13 @@ class ElementParser:
         cleaned = self._clean_model(candidate)
         cleaned = cleaned.strip("、;|,，").strip()
         if not cleaned or self._is_none_token(cleaned):
+            return ""
+        # ⚠️ v0.3.5 **对称加固**（用户原则：品牌和型号不会出现中英文混合词）：
+        #    中英混排的清洗结果**不是一个**型号分词，只能是「别的要素值 + 本要素值」
+        #    被空格粘连的产物（``rules/separators.yaml`` 里空格不是分隔符）→ 不采信。
+        #    与品牌侧 :meth:`_finalize_brand` 的混排护栏对称（v0.3.4 教训：
+        #    **改一侧必查对称侧**，护栏不对称就是下一个缺陷）。
+        if is_mixed_cjk_ascii(cleaned):
             return ""
         return cleaned
 
@@ -650,6 +764,33 @@ class ElementParser:
             return False
         return norm in {"品牌", "BRAND"} or norm.endswith("品牌") or norm.startswith("品牌")
 
+    @staticmethod
+    def _brand_candidate_side(key: str, value: str) -> str:
+        """在「品牌字样落在键上」的段落里，挑选品牌候选应取的那一侧（v0.3.4）。
+
+        背景：申报要素原文存在「元素值**连写**」形态（``rules/separators.yaml`` 只把
+        ``、``/``;``/``；``/``/``/``|`` 归一化为分隔符，**空格不是**）。连写后再出现冒号时，
+        :func:`split_fields` 会按首个冒号切开，把**邻座要素**的取值挤进「值」侧::
+
+            无品牌 无商业价值 用途:电视机用
+            └────── 键 ──────┘ └ 值 ┘   ← 值属于「用途」，不是品牌
+
+        此时品牌候选必须取**键**侧（``无品牌 无商业价值 用途`` → 判「无」），
+        取「值」侧会把别的要素的取值当作品牌（实测产出 ``电视机用``）。
+
+        Args:
+            key: 段落键。
+            value: 段落值。
+
+        Returns:
+            候选值：品牌字样在键上且与值不同 → ``key``；否则 ``value``。
+        """
+        text_key = "" if key is None else str(key)
+        text_value = "" if value is None else str(value)
+        if "品牌" in text_key and text_key != text_value:
+            return text_key
+        return text_value
+
     def _is_model_key(self, key: str) -> bool:
         """判断字段键**恰为**型号字段（用注入的 ``model_field_names``）。
 
@@ -680,14 +821,88 @@ class ElementParser:
                 return True
         return False
 
+    def _starts_with_none_token(self, value: str) -> bool:
+        """判断候选值是否**以「无」类取值开头且被边界隔断**（品牌侧形态 ➋）。
+
+        申报要素原文的常见书写形态是「多个要素值连写、**不带键**」，如实测样本::
+
+            无品牌、无型号、用途：电视机用；结构类型：有接头；额定电压：60V
+            无品牌 无商业价值          ← 现场报告（空格连写）
+
+        ``rules/separators.yaml`` 只把 ``、``/``;``/``；``/``/``/``|`` 归一化为分隔符，
+        **空格不是分隔符** —— 因此 ``无品牌 无商业价值`` 会作为**一个**候选值到达
+        品牌提取。品牌要素的取值就是 ``无品牌`` 本身，其后紧跟的是**别的要素**
+        （``无商业价值``）→ 必须整体判为「无」，**不得**把后续要素带进品牌值。
+
+        判定：候选值以某个 ``none_tokens`` 条目开头，且该条目**之后**紧跟字符串结尾
+        或**非字母数字**字符（边界：空白 / 标点 / 分隔符）。
+
+        ⚠️ 边界护栏是为「不虚高」红线设的：``无`` 开头但后接正文的值
+        （``无商业价值`` / ``无极``）**不得**被当作「无品牌」；
+        与 :func:`core.none_marker` 的 ``brand_bare`` 正则同一位点（行首 + 值侧边界）。
+
+        Args:
+            value: 候选值（已 strip）。
+
+        Returns:
+            ``True`` 表示应判为「无」（品牌值为空）。
+        """
+        text = (value or "").strip()
+        if not text:
+            return False
+        for token in self._none_tokens:
+            norm = ("" if token is None else str(token)).strip()
+            if not norm or not text.startswith(norm):
+                continue
+            rest = text[len(norm):]
+            if not rest or not rest[0].isalnum():
+                # 边界成立（行尾 / 空白 / 标点）→ 该「无」类取值独立成立
+                return True
+        return False
+
+    def _finalize_brand(self, value: str, context: str = "") -> str:
+        """品牌候选**终检**：黑名单护栏 + 分词合法性（v0.3.5 用户原则）。
+
+        :meth:`_match_brand_value` 的四个**采信位点**（② 品牌后缀 / ③ 牌后缀 /
+        ④ 正则捕获 / ⑤ 裸 token）**一律**经此收口。
+
+        为什么要收口（v0.3.4 教训）：上一轮缺陷的根因是**护栏不对称**
+        （型号侧有「``无型号`` 前缀 → 空」而品牌侧没有）。同一类风险在**分支之间**
+        也存在 —— 若只在某个分支加护栏，另一分支就会成为下一个漏口。
+        故所有采信位点共用本方法，**新增分支必须调用它**。
+
+        Args:
+            value: 候选品牌值。
+            context: 语境（供黑名单语境排除）。
+
+        Returns:
+            合规的品牌值；被拦则返回 ``""``。
+        """
+        guarded = self._apply_blacklist(value, context)
+        if not guarded:
+            return ""
+        if is_mixed_cjk_ascii(guarded):
+            # 中英混排 → **不是一个**品牌分词（用户原则 v0.3.5）→ 不采信。
+            # 退回 `""` 后由上层按「申报侧为无」处理（口径 v0.3.2 的显式「无品牌」
+            # 取证链路此时才可能生效）——**绝不放行脏值**（脏值会让该链路整条失效）。
+            return ""
+        return guarded
+
     def _match_brand_value(self, value: str, context: str = "") -> str:
         """对一个候选值应用品牌正则 + 护栏，返回品牌或空串。
 
         处理顺序：
           1. 候选值含冒号（``品牌:X`` 形态）→ 取冒号右侧，仅对**右侧**做正则/采信；
-          2. 候选值不含冒号但以「品牌」结尾（``无品牌`` / ``宇同品牌``）→ 取前缀；
-          3. 候选值以「牌」结尾（``SAMSUNG牌``）→ 取前缀；
-          4. 否则对候选值本身做品牌正则匹配。
+          2. 候选值以「无」类取值**开头**（``无品牌 无商业价值`` / ``无品。``）→ 判空
+             （v0.3.4 缺陷修复，见下文中 ➋ 的说明）；
+          3. 候选值不含冒号但含「品牌」字样（``无品牌`` / ``宇同品牌``）→ 取前缀，
+             并按**空格分词边界**收窄（``_narrow``：v0.3.5）；
+          4. 候选值以「牌」结尾（``SAMSUNG牌``）→ 取前缀（同样按空格分词边界收窄）；
+          5. 否则对候选值本身做品牌正则匹配。
+
+        ⚠️ 四个采信位点（3 / 4 / 5 及 ⑤ 裸 token 兜底）**一律**经
+        :meth:`_finalize_brand` 收口（黑名单 + 分词合法性）—— **新增采信分支必须
+        调用它**，否则会重演「护栏不对称」缺陷（v0.3.4 教训）。
 
         Args:
             value: 候选值。
@@ -701,29 +916,53 @@ class ElementParser:
             return ""
 
         # ① 含冒号：只处理冒号右侧（避免把「外观:品牌」类键误当值）
+        detached = False  # 候选是否已与字段键分离（``品牌:xxx`` 形态）
         if _INTERNAL_COLON in candidate:
             _left, _, candidate = candidate.partition(_INTERNAL_COLON)
             candidate = candidate.strip().strip(";").strip()
-        elif "品牌" in candidate:
-            # ② 以「品牌」结尾的形态：宇同品牌 / 无品牌 → 取前缀为品牌
-            prefix = candidate.replace("品牌", "").strip()
-            if not prefix:
-                return ""
-            if self._is_none_token(prefix):
-                return ""
-            guarded = self._apply_blacklist(prefix, context)
-            if guarded:
-                return guarded
+            detached = True
+        if not candidate:
             return ""
-        elif candidate.endswith("牌") and len(candidate) > 1:
-            # ③ SAMSUNG牌
-            prefix = candidate[:-1].strip()
+
+        # ➋【v0.3.4 缺陷修复】候选值以「无」类取值**开头**且有边界隔断 → 判空。
+        #
+        # 缺陷（现场报告 2026-09-17）：申报要素原文常见「多个要素值连写、不带键」
+        # 形态（``rules/separators.yaml`` 里 ``、``/``;``/``/`` 是分隔符，**空格不是**）。
+        # 实测原文 ``无品牌 无商业价值``（品牌要素值 = ``无品牌``，``无商业价值`` 是
+        # **别的要素**）：整段作为一个候选值到达此处 → ② 的 ``replace("品牌", "")``
+        # 把「品牌」字样去掉后，紧随其后的**其他要素值**被一并带进品牌值 →
+        # 产出脏值 ``无 无商业价值``；该脏值不再是「无」类取值，``is_none_token()``
+        # 随之失效 → **「申报为无 ＋ 图内显式『无品牌』标记 → 核验通过」**
+        # （口径 v0.3.2，用户裁定）的**整条链路被跳过**，记录被误判为 ⚠️
+        # （实测图内品牌文字识别为 ``SKYHORTH``，本应判 ✅ 通过）。
+        #
+        # ⚠️ 必须放在 ②/③/④ **之前**：否则 ④ 的 ``single_char_pai`` 正则（"值 + 牌"）
+        #    会把 ``无品牌`` 拆成 ``品``。
+        # ⚠️ 与型号侧的形态 C（:meth:`_extract_model_from_value` 里
+        #    ``candidate.startswith("无型号") → 空``）**对称** —— 品牌侧此前缺这条
+        #    护栏，是本次缺陷的根因（**实现缺陷**，非口径变更：用户 v0.3.2 已裁定
+        #    「申报无 ＋ 图内有『无品牌』→ 通过」，本次只是让该裁定在该书写形态下生效）。
+        if self._starts_with_none_token(candidate):
+            return ""
+
+        if not detached and "品牌" in candidate:
+            # ② 键未分离的「品牌」字样形态：宇同品牌 / 无品牌 → 取前缀为品牌
+            #    ⚠️ 用 ``split(…, 1)`` 取**首个**「品牌」**之前**的部分，**不得**用
+            #    ``replace``：后者是全局替换，会把品牌值之后的其他要素值带进来
+            #    （v0.3.4 缺陷的另一半根因）。
+            #    ⚠️ v0.3.5：前缀还须按**空格分词边界**收窄 —— 连写形态下前缀会被
+            #    **别的要素**的取值污染（现场报告：``规格:1220mm*(50mm+50mm)*5mm 无品牌``
+            #    → 脏值 ``1220mm*(50mm+50mm)*5mm 无``）。见 :func:`narrow_suffix_token`。
+            prefix = narrow_suffix_token(candidate.split("品牌", 1)[0])
             if not prefix or self._is_none_token(prefix):
                 return ""
-            guarded = self._apply_blacklist(prefix, context)
-            if guarded:
-                return guarded
-            return ""
+            return self._finalize_brand(prefix, context)
+        elif not detached and candidate.endswith("牌") and len(candidate) > 1:
+            # ③ SAMSUNG牌（前缀同样按空格分词边界收窄，与 ② 对称）
+            prefix = narrow_suffix_token(candidate[:-1])
+            if not prefix or self._is_none_token(prefix):
+                return ""
+            return self._finalize_brand(prefix, context)
 
         if not candidate or self._is_none_token(candidate):
             return ""
@@ -735,16 +974,14 @@ class ElementParser:
             if match is not None and match.group(1) is not None:
                 captured = match.group(1).strip()
                 if captured and not self._is_none_token(captured):
-                    guarded = self._apply_blacklist(captured, context)
-                    if guarded:
-                        return guarded
+                    brand = self._finalize_brand(captured, context)
+                    if brand:
+                        return brand
 
         # ⑤ 纯 token 兜底：值不含「:」且长度合理、非字段名 → 直接采信为品牌
         #    （`baori` 这类小写 ASCII 品牌不在任何正则形态里，但确实是品牌值）
         if _BRAND_TOKEN_RE.match(candidate):
-            guarded = self._apply_blacklist(candidate, context)
-            if guarded:
-                return guarded
+            return self._finalize_brand(candidate, context)
 
         return ""
 

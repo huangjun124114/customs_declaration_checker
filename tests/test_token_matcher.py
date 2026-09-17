@@ -277,5 +277,8 @@ class TestTokenMatchModel:
             "sample_line",
             "corrected_from",
             "note",
+            # 口径 v0.3.2：图片侧「显式无标记」取证（仍**绝不进** 13 列汇总表）
+            "none_marker",
+            "none_marker_image",
         }
         assert data["images"] == [1, 3]

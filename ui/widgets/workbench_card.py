@@ -12,6 +12,10 @@
     全部改为散行标签卡；``OcrText.kv`` 仍提取、仍落详细 JSON，只是不进 UI）；
   * **「查看原始 OCR 文本」按钮**（v0.3.0 需求 8）→ 打开**非模态弹窗**
     :class:`ui.widgets.ocr_text_dialog.OcrTextDialog`，**不遮挡图片区**；
+  * **「查看申报要素」按钮**（v0.3.3）→ 打开同款的
+    :class:`ui.widgets.ocr_text_dialog.DeclarationTextDialog`，展示本条记录
+    ``record.raw_element_text``（**记录级**原文，**原样**，不解析不清洗）。
+    与 OCR 弹窗共用右侧定位 → **互斥**（开一个即关另一个，避免完全叠窗）；
   * **重判下拉**（``WORKBENCH_VERDICTS`` —— 四类判定，人工可改成任意一类）；
   * **备注输入框**；
   * **「标记待补图」复选框**（🔵 缺图场景：无图可看，只能标记 + 备注）；
@@ -45,12 +49,12 @@ from PySide6.QtWidgets import (
 )
 
 from core.constants import FIELD_BRAND, FIELD_MODEL, VERDICT_TEXT, WORKBENCH_VERDICTS
-from core.models import CheckResult, ImageEvidence, OcrText, Verdict
+from core.models import CheckResult, DeclarationRecord, ImageEvidence, OcrText, Verdict
 from core.noise_guard import is_none_token
 from core.token_matcher import MATCH_FUZZY, TokenMatch
 from ui.styles.palette import VERDICT_COLORS, Palette
 from ui.widgets.flow_layout import FlowLayout
-from ui.widgets.ocr_text_dialog import OcrTextDialog
+from ui.widgets.ocr_text_dialog import DeclarationTextDialog, OcrTextDialog
 
 __all__ = ["WorkbenchCard"]
 
@@ -67,12 +71,6 @@ _CHAIN_TABLE_QSS = (
     "border:1px solid #DCDFE6;border-radius:6px;}"
     "QHeaderView::section{background:#F5F7FA;color:#303133;border:none;"
     "padding:4px;font-weight:bold;}"
-)
-#: 证据图号按钮：普通态 / 当前选中态高亮
-_SEQ_BTN_QSS = "border-radius:6px; padding:4px 10px;"
-_SEQ_BTN_ACTIVE_QSS = (
-    "background:#1565C0; color:#FFFFFF; border:1px solid #1565C0;"
-    "border-radius:6px; padding:4px 10px; font-weight:bold;"
 )
 
 #: 判定链路三列表头（需求 5 原文口径）
@@ -114,8 +112,6 @@ class WorkbenchCard(QFrame):
         self._result: CheckResult | None = None
         #: 当前选中（右侧正在展示 OCR 的）证据图路径
         self._current_image_path: str = ""
-        #: 图号按钮：image_path → 按钮（供高亮 / 测试查询）
-        self._seq_buttons: dict[str, QPushButton] = {}
         #: `_fit_content_height` 重入闸（视口 Resize ↔ 内容 resize 会互相触发）
         self._fitting_content: bool = False
         self._build_ui()
@@ -193,12 +189,11 @@ class WorkbenchCard(QFrame):
         # ── 需求 5：判定链路（三列：要素 / 申报值 / 判定值）──
         outer.addWidget(self._build_chain())
 
-        # ── 证据图切换器（图号按钮，当前选中态高亮）──
-        outer.addWidget(QLabel("证据图（点击切换）：", self))
-        self.evidence_buttons_area = QWidget(self)
-        # FlowLayout 以 area 为父 → 构造即安装为该控件布局（图号多时自动换行）
-        self.evidence_buttons_row = FlowLayout(self.evidence_buttons_area, margin=0)
-        outer.addWidget(self.evidence_buttons_area)
+        # ⚠️ v0.3.7 需求 1：**证据图切换按钮已迁出本卡片**，改挂在图片查看器正下方
+        #    （:attr:`ui.widgets.image_viewer.ImageViewer.switcher`）。
+        #    原因：本卡是**整卡纵向滚动**的（v0.3.1 设计取向"宁可滚动，不可压扁"），
+        #    判定原因一长，证据图按钮就被推到折叠线以下 —— 现场正是"看不到切换按钮"。
+        #    迁到图片下方后与图片同处固定高度区，**永远可见**，且新增了左右翻页。
 
         # ── 需求 7：当前图 OCR 散行文本（唯一展示形态，无 KV 表格）──
         line_header = QHBoxLayout()
@@ -208,6 +203,14 @@ class WorkbenchCard(QFrame):
         self.btn_view_ocr.setToolTip("以弹窗展示本图 OCR 全文（弹窗不会遮挡图片区）")
         self.btn_view_ocr.clicked.connect(self._on_view_ocr)
         line_header.addWidget(self.btn_view_ocr)
+
+        # ── v0.3.3：申报要素原文入口（记录级，紧邻 OCR 按钮）──
+        self.btn_view_decl = QPushButton("查看申报要素", self)
+        self.btn_view_decl.setToolTip(
+            "以弹窗展示本条记录在申报要素表中的整段原文（未经解析清洗；不会遮挡图片区）"
+        )
+        self.btn_view_decl.clicked.connect(self._on_view_decl)
+        line_header.addWidget(self.btn_view_decl)
         outer.addLayout(line_header)
 
         self.line_area = QWidget(self)
@@ -219,6 +222,9 @@ class WorkbenchCard(QFrame):
         self.ocr_dialog = OcrTextDialog(self)
         self.ocr_dialog.previous_requested.connect(lambda: self._step_image(-1))
         self.ocr_dialog.next_requested.connect(lambda: self._step_image(1))
+
+        # ── v0.3.3：申报要素原文弹窗（记录级；与 OCR 弹窗**互斥**，见 _on_view_decl）──
+        self.decl_dialog = DeclarationTextDialog(self)
 
         # ── 底部操作区（**常驻，不参与滚动**）──
         self.footer = QFrame(self)
@@ -448,7 +454,6 @@ class WorkbenchCard(QFrame):
         )
 
         self._render_chain(result)
-        self._render_evidence_buttons(result)
         self._render_current_image(result)
 
         # 预置重判下拉为当前判定
@@ -475,8 +480,8 @@ class WorkbenchCard(QFrame):
     def set_current_image(self, path: str) -> None:
         """切换「当前查看的图片」并只重渲染该图的证据。
 
-        由 :class:`ui.widgets.review_workbench.ReviewWorkbench` 在切换左侧查看器
-        图片时**同步**调用。
+        由 :class:`ui.widgets.review_workbench.ReviewWorkbench` 在切换图片时
+        **同步**调用（切换条点选 / 左右翻页 / 弹窗翻页 / 换记录均走这里）。
 
         Args:
             path: 目标图片路径；为空时回退到「第一条存在图」。
@@ -487,7 +492,6 @@ class WorkbenchCard(QFrame):
         target = str(path or "").strip()
         if target != self._current_image_path:
             self._current_image_path = target
-        self._render_evidence_buttons(self._result)
         self._render_current_image(self._result)
         # 散行数随图片变化 → 内容高度需重算
         self._fit_content_height()
@@ -505,6 +509,9 @@ class WorkbenchCard(QFrame):
         # 弹窗可见时跟随刷新（不自动弹起，避免"切图就跳窗"）
         if self.ocr_dialog.isVisible():
             self._refresh_ocr_dialog()
+        # v0.3.3：申报要素弹窗是**记录级**，换记录后若仍开着必须同步换原文
+        if self.decl_dialog.isVisible():
+            self._refresh_decl_dialog()
 
     def _render_lines(self, evidence: ImageEvidence | None) -> None:
         """把当前图 OCR **全部行**渲染为散行标签卡（不再剔除已成键值对的行）。
@@ -518,46 +525,14 @@ class WorkbenchCard(QFrame):
         lines = list(ocr.lines()) if ocr is not None else []
         self._fill_flow_labels(self.line_flow, lines, empty_hint="（本图无识别文本）")
 
-    def _render_evidence_buttons(self, result: CheckResult) -> None:
-        """为每张存在的证据图生成跳转按钮；给**当前选中态加高亮**。"""
-        self._clear_layout(self.evidence_buttons_row)
-        self._seq_buttons.clear()
-
-        evidences = self._evidences(result)
-        if self._current_image_path not in {
-            str(getattr(ev, "image_path", "")) for ev in evidences
-        }:
-            # 当前路径不在本记录中 → 回退到「第一条存在图」
-            self._current_image_path = self._default_image_path(result)
-
-        shown = False
-        for ev in evidences:
-            if not getattr(ev, "exists", False):
-                continue
-            shown = True
-            path = str(getattr(ev, "image_path", ""))
-            seq = getattr(ev, "seq", 0)
-            btn = QPushButton(f"图{seq}", self.evidence_buttons_area)
-            btn.clicked.connect(lambda _=False, p=path: self._on_seq_button(p))
-            self._seq_buttons[path] = btn
-            self._style_seq_button(btn, active=(path == self._current_image_path))
-            self.evidence_buttons_row.addWidget(btn)
-            self._reveal(btn)
-        if not shown:
-            hint = QLabel("（无可预览图片）", self.evidence_buttons_area)
-            hint.setStyleSheet("color:#909399;")
-            self.evidence_buttons_row.addWidget(hint)
-            self._reveal(hint)
-
     def _on_seq_button(self, path: str) -> None:
-        """图号按钮点击：切换当前图并通知外部（左侧查看器）。"""
+        """切到某张证据图并通知外部（左侧查看器 / 工作台的**唯一**接线口）。
+
+        ⚠️ v0.3.7 起卡片上已无图号按钮，本方法仍被
+        :meth:`_step_image`（OCR 弹窗的「上一张 / 下一张」）复用。
+        """
         self.set_current_image(path)
         self.evidence_selected.emit(path)
-
-    def _style_seq_button(self, button: QPushButton, *, active: bool) -> None:
-        """按当前选中态刷新按钮样式与可测试属性。"""
-        button.setProperty("evidenceCurrent", bool(active))
-        button.setStyleSheet(_SEQ_BTN_ACTIVE_QSS if active else _SEQ_BTN_QSS)
 
     # ─────────────────────── 需求 5：判定链路三列 ───────────────────────
 
@@ -613,7 +588,8 @@ class WorkbenchCard(QFrame):
 
           1. ``TokenMatch``（**引擎回吐的真实取证**）：
              ``EXACT`` → ✅ 命中完整分词「token」（图 n）；``FUZZY`` → ✅ + 误读纠正说明；
-             ``NONE`` → ❌ 图内为「detected」/ ⚠️ 图内未出现{field}文字 / 申报为无
+             ``NONE`` → ✅ 图内显式标注「无品牌/无型号」（v0.3.2 口径）/
+             ❌ 图内为「detected」/ ⚠️ 图内未出现{field}文字 / 申报为无
           2. 无 ``TokenMatch``（旧结果集 / 未走新链路）→ 回退 ``detected_*`` 并标注「旧链路」。
 
         Returns:
@@ -651,6 +627,14 @@ class WorkbenchCard(QFrame):
             return f"✅ 完整分词「{token}」{images}", color, tooltip
 
         # ── NONE：按方案 §3.1 两级分流语义呈现（文案从简，细节在 tooltip / 判定原因）──
+        # 【口径 v0.3.2】图片侧「显式无标记」＋ 申报侧为无 → 双方均为无，判合格
+        marker = (getattr(match, "none_marker", "") or "").strip()
+        if marker:
+            return (
+                f"✅ 图内显式标注「{marker}」{images}",
+                VERDICT_COLORS.get(Verdict.PASS.value, Palette.TEXT),
+                tooltip,
+            )
         if is_none_token(match.declared) or not (match.declared or "").strip():
             return "— 申报为无，未参与匹配", Palette.TEXT_WEAK, tooltip
         if "命中作废" in note:
@@ -707,18 +691,104 @@ class WorkbenchCard(QFrame):
         reason = (getattr(result, "reason", "") or "").strip()
         return html.escape(reason) if reason else "（无差异说明）"
 
-    # ─────────────────────── 需求 8：原始 OCR 弹窗 ───────────────────────
+    # ─────────────────────── 需求 8：原文弹窗（OCR / 申报要素）───────────────────────
 
     def _on_view_ocr(self) -> None:
         """点击「查看原始 OCR 文本」→ 刷新并显示**非模态弹窗**（单例）。
 
         弹窗定位在**主窗口右侧外**（或屏幕右缘、图片区右边界之外），
         **不遮挡图片区**（需求 8 关键约束）。
+
+        ⚠️ 与「申报要素」弹窗共用右侧定位 → 先关掉对方，避免两窗完全重叠
+        （见 :meth:`_on_view_decl`）。
         """
         if self._result is None:
             return
+        self.decl_dialog.hide()
         self._refresh_ocr_dialog()
         self.ocr_dialog.show_beside(main_window=self.window(), avoid=self._image_area())
+
+    def _on_view_decl(self) -> None:
+        """点击「查看申报要素」→ 以弹窗展示本条记录的**申报要素整段原文**（v0.3.3）。
+
+        弹窗与「原始 OCR 文本」同款：**非模态、右侧、垂直居中、不遮挡图片区**。
+
+        ⚠️ **只读原样**：正文取 ``record.raw_element_text``，**不做** strip / 清洗 /
+        截断 / 反解析 —— 项目的「原始输入只进不改」铁律；判定契约也要求
+        ``raw_element_text`` 保留原始形态（``docs/04`` 裁决二）。解析出的品牌/型号
+        仅作为**附加提示**（:meth:`_refresh_decl_dialog`），不替换原文。
+        """
+        if self._result is None:
+            return
+        self.ocr_dialog.hide()
+        self._refresh_decl_dialog()
+        self.decl_dialog.show_beside(main_window=self.window(), avoid=self._image_area())
+
+    def _refresh_decl_dialog(self) -> None:
+        """按当前记录刷新申报要素弹窗（内容与当前图无关）。"""
+        record = self._record()
+        raw = str(getattr(record, "raw_element_text", "") or "")
+        self.decl_dialog.set_content(
+            self._decl_dialog_title(record),
+            raw if raw else "（本条记录无申报要素原文）",
+        )
+        self.decl_dialog.set_hint(self._decl_parse_hint(record))
+
+    @staticmethod
+    def _decl_dialog_title(record: DeclarationRecord | None) -> str:
+        """构造申报要素弹窗标题（**纯函数**，便于单测）。
+
+        Args:
+            record: 源申报记录；``None`` 时返回占位标题。
+
+        Returns:
+            形如 ``第 3 条 · 料号 N100204 · 订单号 1652AM00 · 票号 SA26090215``
+            （缺字段则跳过；全缺则 ``（未知记录）``）。
+        """
+        if record is None:
+            return "（未知记录）"
+        parts: list[str] = []
+        seq = int(getattr(record, "seq_no", 0) or 0)
+        if seq:
+            parts.append(f"第 {seq} 条")
+        part_no = str(getattr(record, "part_no", "") or "")
+        if part_no:
+            parts.append(f"料号 {part_no}")
+        order_no = str(getattr(record, "order_no", "") or "")
+        if order_no:
+            parts.append(f"订单号 {order_no}")
+        ticket_no = str(getattr(record, "ticket_no", "") or "")
+        if ticket_no:
+            parts.append(f"票号 {ticket_no}")
+        return " · ".join(parts) if parts else "（未知记录）"
+
+    @staticmethod
+    def _decl_parse_hint(record: DeclarationRecord | None) -> str:
+        """构造申报要素弹窗的**附加提示**：解析出的品牌 / 型号（**纯函数**）。
+
+        用途：让复核人一眼看到"工具从这段原文里取到了什么"，而正文仍是原样原文
+        —— 二者并列展示，避免"看到原文却不知道解析结果"的来回切换。
+
+        Args:
+            record: 源申报记录。
+
+        Returns:
+            提示语；无解析结果时给出明确说明（而非空白）。
+        """
+        if record is None:
+            return ""
+        brand = str(getattr(record, "decl_brand", "") or "")
+        model = str(getattr(record, "decl_model", "") or "")
+        if not brand and not model:
+            return "提示：未从该原文解析出品牌 / 型号（可能要素缺失），请人工看图判断。"
+        return (
+            f"解析结果（仅供参考，正文未改动）：{FIELD_BRAND}={brand or '—'}　"
+            f"{FIELD_MODEL}={model or '—'}"
+        )
+
+    def _record(self) -> DeclarationRecord | None:
+        """返回当前结果的源申报记录（``None`` 表示无记录）。"""
+        return getattr(self._result, "record", None) if self._result is not None else None
 
     def _refresh_ocr_dialog(self) -> None:
         """按当前图刷新弹窗内容（含「上一张 / 下一张」可用性）。"""
@@ -840,11 +910,20 @@ class WorkbenchCard(QFrame):
         return text if text else "（无）"
 
     def _clear_layout(self, layout) -> None:
-        """清空布局中的全部控件（带 deleteLater）。"""
+        """清空布局中的全部控件（**同步**解除可见性后再 ``deleteLater``）。
+
+        ⚠️ **不能只调 ``deleteLater()``**（v0.3.7 修）：它是**异步**的，
+        而 ``takeAt(0)`` 只把控件从**布局**摘掉 —— 控件仍是父级的**子控件**，
+        会**继续按旧坐标渲染**到下轮事件循环。切记录时表现为
+        **上一条的散行标签残影**（本项目 §E 已有同源教训：「不进布局≠不可见，
+        要真不可见必须显式 ``hide()``」）。
+        """
         while layout.count():
             item = layout.takeAt(0)
             widget = item.widget() if item is not None else None
             if widget is not None:
+                widget.hide()
+                widget.setParent(None)
                 widget.deleteLater()
 
     def _fill_flow_labels(self, layout, texts: list[str], *, empty_hint: str) -> None:
@@ -900,15 +979,16 @@ class WorkbenchCard(QFrame):
         """清空为「未选择」态。"""
         self._result = None
         self._current_image_path = ""
-        self._seq_buttons.clear()
         self.identity_label.setText("（未选择记录）")
         self.verdict_badge.setText("")
         self.verdict_badge.setStyleSheet("")
         self._clear_chain()
-        self._clear_layout(self.evidence_buttons_row)
         self._clear_layout(self.line_flow)
         if self.ocr_dialog.isVisible():
             self.ocr_dialog.hide()
+        # v0.3.3：申报要素弹窗同为**记录级**视图，记录清空后不得滞留旧原文
+        if self.decl_dialog.isVisible():
+            self.decl_dialog.hide()
         self.note_edit.clear()
         self.mark_missing_check.setChecked(False)
         self.hint_label.clear()

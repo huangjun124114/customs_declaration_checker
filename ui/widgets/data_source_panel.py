@@ -225,9 +225,25 @@ class DataSourcePanel(QFrame):
         return lbl
 
     def _wire(self) -> None:
-        """接线输入变化信号（票号只读，不参与 inputs_changed）。"""
+        """接线输入变化信号（票号只读，不参与 inputs_changed）。
+
+        ⚠️ **必须经一层 Python 槽转发**，不能写成 ``connect(self.inputs_changed.emit)``：
+
+        ``QLineEdit.textChanged`` **只有 ``(str)`` 一个重载**，而 ``Signal.emit``
+        的形参是 ``*args`` → PySide6 无法据此截断参数，会把文本原样传给 emit →
+        ``TypeError: inputs_changed() only accepts 0 argument(s), 1 given!``
+        （实测：手工输入 / 粘贴 / 清空路径时 stderr 每次都抛，信号**从未发出**）。
+
+        反例警告：``QPushButton.clicked`` **恰好能用**同样的写法 —— 因为它有
+        ``clicked()`` / ``clicked(bool)`` 双重载，PySide6 会自动挑 0 参那个。
+        **别照抄按钮的写法。**
+        """
         for edit in (self.excel_edit, self.share_edit):
-            edit.textChanged.connect(self.inputs_changed.emit)
+            edit.textChanged.connect(self._on_edit_changed)
+
+    def _on_edit_changed(self, _text: str) -> None:
+        """输入框内容变化 → 转成无参 ``inputs_changed``（丢弃文本，只做"变了"通知）。"""
+        self.inputs_changed.emit()
 
     # ─────────────────────── 输出目录（派生）───────────────────────
 

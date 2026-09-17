@@ -227,9 +227,43 @@ class TestFuzzyThresholds:
         """规则表的 fuzzy verdict 必须是 SUSPICIOUS（红线）。"""
         assert guard.noise_rules.fuzzy_verdict == "SUSPICIOUS"
 
-    def test_no_rules_fallback(self, guard_no_rules: NoiseGuard) -> None:
-        """无规则仓库时使用 constants 兜底默认值，行为一致。"""
-        assert guard_no_rules.classify("SKYWORTH P/N", "SKYHORTH P/H") == NoiseLevel.SUSPICIOUS
+    def test_no_rules_fallback(self, guard_no_rules: NoiseGuard, guard: NoiseGuard) -> None:
+        """无规则仓库时的兜底行为必须与 repo 路径**完全一致**。
+
+        ⚠️ **本用例于 v0.3.2 修正（口径等价性，非"改测试凑绿"）**：
+
+          * 修正前兜底分支**漏传** ``known_noise_samples`` → ``SKYHORTH P/H`` 走不到
+            "已知误读自动纠正"，只能靠易混字符兜住 → 返回 ``SUSPICIOUS``；
+            repo 路径则先纠正为 ``SKYWORTH P/N`` → 与申报值相等 → ``DEFINITE_MATCH``。
+            即**兜底 ≠ repo**（缺陷 F 的同类隐患），该用例恰好把"错误行为"锁死了。
+          * 修正后兜底补全全部字段（含样本表），两条路径**殊途同归**。
+        """
+        assert (
+            guard_no_rules.classify("SKYWORTH P/N", "SKYHORTH P/H")
+            == NoiseLevel.DEFINITE_MATCH
+        )
+        # 关键：与 repo 路径行为一致（这才是"兜底 ≡ repo"的可证伪判据）
+        assert guard_no_rules.classify(
+            "SKYWORTH P/N", "SKYHORTH P/H"
+        ) == guard.classify("SKYWORTH P/N", "SKYHORTH P/H")
+
+    def test_fallback_matches_repo_on_unrelated_strings(
+        self, guard_no_rules: NoiseGuard, guard: NoiseGuard
+    ) -> None:
+        """抽样对照：多组取值在两条路径上判定一致。"""
+        samples = [
+            ("SKYWORTH P/N", "SKYHORTH P/H"),
+            ("baori", "boori"),
+            ("GXD-009", "600-CX9"),
+            ("ABCD", "AXCD"),
+            ("AB12", "AB13"),
+            ("DAEWOO", "SKYWORTH"),
+            ("无", "无"),
+        ]
+        for left, right in samples:
+            assert guard_no_rules.classify(left, right) == guard.classify(
+                left, right
+            ), f"兜底与 repo 判定不一致：{left} / {right}"
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -337,6 +371,53 @@ class TestKnownNoiseSampleGranularity:
         assert guard.correct_known_misread("boori") == "baori"
         assert guard.correct_known_misread("600-CX9") == "GXD-009"
         assert guard.correct_known_misread("DAEWOO") == "DAEWOO"
+
+
+# ══════════════════════════════════════════════════════════════════
+#  兜底 ≡ repo（缺陷 F 的根本教训，v0.3.2 补机器锁）
+# ══════════════════════════════════════════════════════════════════
+
+
+class TestFallbackEquivalence:
+    """``NoiseGuard(None)`` 的规则集必须与 `NoiseGuard(repo)` **逐字段等价**。
+
+    缺陷 F 的根因是"兜底分支漏传字段" → YAML 缺失（打包漏拷 / 用户覆盖不完整）时
+    静默失效，且**源码态测试全绿看不出来**。故此处不只测"不崩"，而是**逐字段比对**。
+    """
+
+    #: 与 ``source_path`` 无关的规则字段（来源路径本就应当不同）
+    _FIELDS = (
+        "confusable_chars",
+        "fuzzy_max_edit_distance",
+        "fuzzy_min_length",
+        "fuzzy_verdict",
+        "low_confidence_threshold",
+        "fragment_min_chars",
+        "known_noise_samples",
+        "letter_diff_min_length",
+        "letter_diff_max_edit_distance",
+        "letter_diff_verdict",
+    )
+
+    def test_every_field_equivalent(self, guard: NoiseGuard) -> None:
+        fallback = NoiseGuard(None).noise_rules
+        for name in self._FIELDS:
+            assert getattr(fallback, name) == getattr(guard.noise_rules, name), (
+                f"兜底与 repo 的 {name} 不等价 —— 缺陷 F 复发风险"
+            )
+
+    def test_whole_machine_rules_equivalent(self, guard: NoiseGuard) -> None:
+        fallback = NoiseGuard(None).whole_machine_rules
+        loaded = guard.whole_machine_rules
+        assert list(fallback.context_tokens) == list(loaded.context_tokens)
+        assert fallback.context_scope == loaded.context_scope
+
+    def test_known_sample_correction_works_without_repo(self) -> None:
+        """兜底路径也必须能纠正已知误读（缺陷 F 的**行为级**锁）。"""
+        fallback = NoiseGuard(None)
+        assert fallback.correct_known_misread("SKYHORTH") == "SKYWORTH P/N"
+        assert fallback.is_known_noise_sample("IFR") is True
+
 
     def test_known_misread_corrected_then_compared(self, guard: NoiseGuard) -> None:
         """裁决 2（§4.6）：``SKYHORTH``→纠正 ``SKYWORTH P/N``→与 ``DAEWOO``

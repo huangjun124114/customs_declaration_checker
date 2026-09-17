@@ -295,6 +295,36 @@ class TestConsistencyWithConstants:
         assert rules.fuzzy_max_edit_distance == C.DEFAULT_FUZZY_MAX_EDIT_DISTANCE
         assert rules.fuzzy_min_length == C.DEFAULT_FUZZY_MIN_LENGTH
 
+    def test_none_markers_match(self, rule_repo: RuleRepository) -> None:
+        """口径 v0.3.2：``none_markers``（显式无标记）与 constants 一致。"""
+        loaded = [list(item) for item in rule_repo.get().brand_patterns.none_markers]
+        assert loaded == [list(item) for item in C.DEFAULT_NONE_MARKERS]
+
+    def test_letter_diff_params_match(self, rule_repo: RuleRepository) -> None:
+        """口径 v0.3.2：``letter_only_difference`` 与 constants 一致。"""
+        rules = rule_repo.get().noise_signals
+        assert rules.letter_diff_min_length == C.DEFAULT_LETTER_DIFF_MIN_LENGTH
+        assert (
+            rules.letter_diff_max_edit_distance
+            == C.DEFAULT_LETTER_DIFF_MAX_EDIT_DISTANCE
+        )
+        assert rules.letter_diff_verdict == C.DEFAULT_LETTER_DIFF_VERDICT.value
+
+    def test_known_noise_samples_match(self, rule_repo: RuleRepository) -> None:
+        """⚠️ 缺陷 F 回归锁：兜底样本表必须与 YAML **逐条等价**。
+
+        缺此锁时，"YAML 缺失 → 兜底不含样本 → 已知误读纠正静默失效"会再次复发
+        （表现为"源码态全绿、打包后判定全变"）。
+        """
+        loaded = [dict(s) for s in rule_repo.get().noise_signals.known_noise_samples]
+        assert loaded == [dict(s) for s in C.DEFAULT_KNOWN_NOISE_SAMPLES]
+
+    def test_confidence_and_fragment_match(self, rule_repo: RuleRepository) -> None:
+        """低置信度阈值 / 残片阈值同样须与兜底常量一致（兜底 ≠ repo 是静默失效温床）。"""
+        rules = rule_repo.get().noise_signals
+        assert rules.low_confidence_threshold == C.DEFAULT_LOW_CONFIDENCE_THRESHOLD
+        assert rules.fragment_min_chars == C.DEFAULT_FRAGMENT_MIN_CHARS
+
 
 class TestKnownNoiseSamples:
     """实测噪声样本回归集（v1.2 第 13.5.1 节）。"""

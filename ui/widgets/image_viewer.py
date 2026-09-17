@@ -13,6 +13,21 @@
 ``is_pannable`` 的尺寸判断天然跟随旋转结果，**不会出现"旋转后裁切/拖不动"**。
 换图（``load``）与清空（``clear`` / ``show_message``）自动复位为 0°。
 
+**v0.3.7 需求 1 / 2 / 3 —— 切换条下沉到图片下方 + 命中标红 + 红色五角星**：
+
+  * **切换条位置（需求 1）**：证据图切换按钮原先挂在**右侧证据卡**里（``WorkbenchCard``），
+    而该卡是**整卡纵向滚动**的 —— 判定原因一长，切换按钮就被推到折叠线以下，
+    现场"看不到切换按钮"。现改为**常驻在图片正下方**（:attr:`ImageViewer.switcher`），
+    与图片同处查看器的固定区域，不受右侧卡片内容高度影响。
+  * **左右切换（需求 1）**：新增 ``◀ 上一张`` / ``下一张 ▶`` 两个按钮 ——
+    原先只能点具体图号，逐张前后翻必须精确点中按钮，效率低。
+  * **命中标红（需求 2）**：**命中申报要素**的图，其切换按钮用**红色**；
+    其余用**主题色**（``Palette.ACCENT`` 蓝）。命中信息由上层（工作台）按
+    ``CheckResult.token_matches`` 计算后经 :meth:`ImageViewer.set_images` 注入 ——
+    本模块**不重算任何判定**，只做展示。
+  * **红色五角星（需求 3）**：当前图命中时，在**图片右上角**叠加红色 ``★``
+    （:class:`_ImageStage.paintEvent` 绘制，随缩放 / 旋转自动跟随）。
+
 **v0.2.0 点 9.1 —— 拖动平移 bug 修复**（根因：布局自矛盾）：
 原先 ``setWidgetResizable(True)``（强制 label 拉伸到视口大小）与
 ``_render()`` 里 ``image_label.resize(scaled.size())``（按缩放后尺寸调整 label）
@@ -32,8 +47,18 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QPoint, Qt, Signal
-from PySide6.QtGui import QMouseEvent, QPixmap, QResizeEvent, QTransform, QWheelEvent
+from PySide6.QtCore import QEvent, QPoint, QRect, Qt, Signal
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QMouseEvent,
+    QPainter,
+    QPaintEvent,
+    QPixmap,
+    QResizeEvent,
+    QTransform,
+    QWheelEvent,
+)
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -45,6 +70,7 @@ from PySide6.QtWidgets import (
 )
 
 from ui.styles.palette import Palette
+from ui.widgets.flow_layout import FlowLayout
 
 __all__ = ["ImageViewer"]
 
@@ -55,18 +81,112 @@ _ROTATION_STEP = 90
 #: 旋转角度固定取值（0/90/180/270）
 _ROTATIONS = (0, 90, 180, 270)
 
+#: 「未命中」按钮的主题色（= :data:`ui.styles.palette.Palette.ACCENT`）
+_SWITCH_THEME_COLOR: str = Palette.ACCENT
+#: 「命中申报要素」按钮与五角星的红色
+_SWITCH_HIT_COLOR: str = Palette.DANGER
+
+
+def _switch_button_qss(*, hit: bool, active: bool) -> str:
+    """构造切换条上「图 N」按钮的样式（**命中红 / 未命中主题色**，需求 2）。
+
+    Args:
+        hit: 该图是否命中申报要素。
+        active: 该图是否为当前正在查看的图。
+
+    Returns:
+        内联 QSS 字符串（四态：命中×选中 / 命中×未选中 / 未命中×选中 / 未命中×未选中）。
+    """
+    color = _SWITCH_HIT_COLOR if hit else _SWITCH_THEME_COLOR
+    if active:
+        background, foreground, weight = color, "#FFFFFF", "font-weight:bold;"
+    else:
+        background, foreground, weight = "#FFFFFF", color, ""
+    return (
+        f"QPushButton{{background:{background};color:{foreground};"
+        f"border:1px solid {color};border-radius:6px;padding:4px 10px;{weight}}}"
+    )
+
+
+class _ImageStage(QLabel):
+    """图片舞台（``QLabel`` 子类）：在图片**右上角**绘制红色五角星（v0.3.7 需求 3）。
+
+    **为什么直接画在 label 上、而不是叠一个子控件**：本查看器在
+    ``setWidgetResizable(False)`` 下把 label 的尺寸**钉在缩放后的图片尺寸**上
+    （见 :meth:`ImageViewer._render` 的 ``image_label.resize(scaled.size())``），
+    故「label 的右上角」恒等价于「图片的右上角」，且缩放 / 旋转后**自动跟随**，
+    不需要任何额外的几何同步代码。
+
+    ⚠️ 只在**真的显示了图片**（``pixmap()`` 非空）时才画 —— 缺图 / 加载失败时
+    label 显示的是纯文本占位语，此时画星会误导复核人。
+    """
+
+    #: 五角星绘制区边长（px）
+    _STAR_SIZE: int = 28
+    #: 距右上角内边距（px）
+    _STAR_PAD: int = 8
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        """构造图片舞台。"""
+        super().__init__(parent)
+        self._star: bool = False
+
+    def set_star(self, flag: bool) -> None:
+        """设置/清除「命中」五角星（值未变时不重绘）。"""
+        value = bool(flag)
+        if value != self._star:
+            self._star = value
+            self.update()
+
+    def star(self) -> bool:
+        """返回当前是否显示五角星。"""
+        return self._star
+
+    def paintEvent(self, event: QPaintEvent) -> None:  # noqa: N802 - Qt 覆写命名
+        """先画 QLabel 自身内容，再叠加右上角红色五角星。"""
+        super().paintEvent(event)
+        if not self._star:
+            return
+        pixmap = self.pixmap()
+        if pixmap is None or pixmap.isNull():
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        size, pad = self._STAR_SIZE, self._STAR_PAD
+        x = max(0, self.width() - size - pad)
+        y = pad
+        # 半透明白底：深色实拍图上红色五角星同样清晰（不加底会糊成一块）
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(255, 255, 255, 215))
+        painter.drawEllipse(x - 3, y - 3, size + 6, size + 6)
+
+        font = QFont(self.font())
+        font.setPointSize(16)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(QColor(_SWITCH_HIT_COLOR))
+        painter.drawText(QRect(x, y, size, size), Qt.AlignmentFlag.AlignCenter, "★")
+        painter.end()
+
+
 
 class ImageViewer(QFrame):
-    """可缩放 / 可平移的图片查看器。
+    """可缩放 / 可平移的图片查看器（含图片下方的证据图切换条）。
 
     Signals:
         load_failed: 加载图片失败（携带路径与原因）。
+        image_requested: 用户在切换条上选了另一张图（携带目标路径）。
+            ⚠️ 本控件**只发信号、不自己换图** —— 换图需同时同步右侧证据卡，
+            由 :class:`ui.widgets.review_workbench.ReviewWorkbench` 统一处理，
+            避免"图切了、右边 OCR 没跟着变"的经典不一致。
 
     Args:
         parent: Qt 父控件。
     """
 
     load_failed = Signal(str, str)
+    image_requested = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         """构造图片查看器。"""
@@ -80,12 +200,20 @@ class ImageViewer(QFrame):
         #: 拖拽平移状态机（按下 → 移动 → 松手）
         self._dragging: bool = False
         self._drag_origin: QPoint = QPoint()
+        #: 切换条数据：``[(seq, path, is_hit), ...]``（v0.3.7 需求 1/2）
+        self._image_items: list[tuple[int, str, bool]] = []
+        #: 图号按钮：``path → 按钮``（供高亮 / 命中标红 / 测试查询）
+        self._image_buttons: dict[str, QPushButton] = {}
+        #: 切换条上的「当前图」路径（高亮 + 五角星的依据，可能与 `_current_path` 短暂不一致）
+        self._selected_path: str = ""
+        #: 空的切换条提示标签（无图时显示）
+        self._switch_hint: QLabel | None = None
         self._build_ui()
 
     # ─────────────────────── 构建 ───────────────────────
 
     def _build_ui(self) -> None:
-        """搭建查看器布局。"""
+        """搭建查看器布局（工具栏 / 图片 / **切换条** / 路径）。"""
         outer = QVBoxLayout(self)
         outer.setContentsMargins(10, 10, 10, 10)
         outer.setSpacing(6)
@@ -135,7 +263,8 @@ class ImageViewer(QFrame):
         self.scroll.setWidgetResizable(False)
         # 图片小于视口时居中显示；大于视口时该对齐被忽略、按需出现滚动条。
         self.scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.image_label = QLabel("（未选择记录）", self)
+        # v0.3.7 需求 3：换用 _ImageStage（在图片右上角叠加命中五角星）
+        self.image_label = _ImageStage(self)
         self.image_label.setObjectName("imageStage")
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.image_label.setMinimumSize(320, 260)
@@ -149,6 +278,9 @@ class ImageViewer(QFrame):
         self.image_label.installEventFilter(self)
         outer.addWidget(self.scroll, 1)
 
+        # ── v0.3.7 需求 1：证据图切换条（**紧贴图片下方**，常驻不随卡片滚动）──
+        outer.addWidget(self._build_switcher())
+
         self.path_label = QLabel("", self)
         self.path_label.setObjectName("reviewHint")
         self.path_label.setWordWrap(True)
@@ -156,6 +288,58 @@ class ImageViewer(QFrame):
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
         outer.addWidget(self.path_label)
+
+    def _build_switcher(self) -> QWidget:
+        """构建图片下方的证据图切换条（需求 1 / 2 / 3）。
+
+        **为什么必须放在图片下方（而不是右侧证据卡里）**：右侧证据卡是
+        **整卡纵向滚动**的（v0.3.1 设计取向：宁可滚动，不可压扁）—— 判定原因一长，
+        原本挂在卡片里的图号按钮就被推到折叠线以下，现场表现为"看不到切换按钮"。
+        切到这里后它与图片同处一个固定高度区域（图片区拉伸 1、切换条自然高），
+        **永远可见**。
+
+        布局：``[◀ 上一张] [图 1 图 2 …（流式换行）] [下一张 ▶] [★ 命中提示]``。
+        """
+        holder = QFrame(self)
+        holder.setObjectName("imageSwitcher")
+        holder.setStyleSheet(
+            "QFrame#imageSwitcher{background:#F5F7FA;border:1px solid #DCDFE6;"
+            "border-radius:6px;}"
+        )
+        row = QHBoxLayout(holder)
+        row.setContentsMargins(8, 6, 8, 6)
+        row.setSpacing(6)
+
+        # 左右切换（需求 1）：逐张前后翻，不必精确点中图号
+        self.btn_prev_image = QPushButton("◀ 上一张", holder)
+        self.btn_next_image = QPushButton("下一张 ▶", holder)
+        self.btn_prev_image.setToolTip("切换到上一张证据图（←）")
+        self.btn_next_image.setToolTip("切换到下一张证据图（→）")
+        for btn in (self.btn_prev_image, self.btn_next_image):
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet(
+                f"QPushButton{{background:#FFFFFF;color:{_SWITCH_THEME_COLOR};"
+                f"border:1px solid {_SWITCH_THEME_COLOR};border-radius:6px;"
+                "padding:4px 10px;}"
+            )
+        self.btn_prev_image.clicked.connect(lambda: self.step_image(-1))
+        self.btn_next_image.clicked.connect(lambda: self.step_image(1))
+        row.addWidget(self.btn_prev_image)
+
+        # 图号按钮（流式，图多时自动换行；命中态标红）
+        self.thumbs_area = QWidget(holder)
+        self.thumbs_layout = FlowLayout(self.thumbs_area, margin=0)
+        row.addWidget(self.thumbs_area, 1)
+        row.addWidget(self.btn_next_image)
+
+        # 命中提示（需求 3 的文字版，与图片右上角五角星互补）
+        self.hit_label = QLabel("", holder)
+        self.hit_label.setStyleSheet(
+            f"color:{_SWITCH_HIT_COLOR};font-weight:bold;"
+        )
+        row.addWidget(self.hit_label)
+        return holder
+
 
     # ─────────────────────── 公开 API ───────────────────────
 
@@ -169,6 +353,9 @@ class ImageViewer(QFrame):
         self.image_label.setText(text)
         self.path_label.setText("")
         self.scale_label.setText("—")
+        # 无图 → 不得留星（否则占位文案上顶着一颗"命中"星，误导复核）
+        self.image_label.set_star(False)
+        self._sync_switcher()
         self._apply_cursor()
 
     def load(self, image_path: str) -> bool:
@@ -202,7 +389,152 @@ class ImageViewer(QFrame):
         self._render()
         # 首次加载自动适应窗口
         self.fit_to_window()
+        # 直接 load（不经 set_current_image）时同步切换条高亮与五角星
+        if self._selected_path != path:
+            self._selected_path = path
+        self._sync_switcher()
         return True
+
+    # ─────────── v0.3.7 需求 1/2/3：证据图切换条 ───────────
+
+    def set_images(self, items: list[tuple[int, str, bool]] | None = None) -> None:
+        """重建图片下方的切换条（图号按钮 + 命中标红）。
+
+        Args:
+            items: ``[(seq, path, is_hit), ...]`` —— 只应传**存在且可预览**的图；
+                ``is_hit`` 由调用方（工作台）按 ``CheckResult.token_matches`` 判定，
+                **本控件不重算任何判定**。``None`` / 空序列 → 清空并显示占位提示。
+        """
+        self._clear_thumb_buttons()
+        self._image_items = [
+            (int(seq or 0), str(path or ""), bool(hit))
+            for seq, path, hit in (items or [])
+            if str(path or "").strip()
+        ]
+
+        if not self._image_items:
+            hint = QLabel("（无可预览图片）", self.thumbs_area)
+            hint.setStyleSheet(f"color:{Palette.TEXT_WEAK};")
+            self.thumbs_layout.addWidget(hint)
+            hint.show()
+            self._switch_hint = hint
+        else:
+            for seq, path, hit in self._image_items:
+                btn = QPushButton(f"图{seq}", self.thumbs_area)
+                btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn.setToolTip(
+                    ("★ 本图命中申报要素" if hit else "本图未命中申报要素")
+                    + f"\n{path}"
+                )
+                btn.clicked.connect(lambda _=False, p=path: self._request_image(p))
+                self._image_buttons[path] = btn
+                self.thumbs_layout.addWidget(btn)
+                # ⚠️ 同 WorkbenchCard._reveal：addWidget 的显示是 queued 的，
+                #    不显式 show() 则当拍 isHidden() → FlowLayout 高度算成 0
+                btn.show()
+
+        if self._selected_path not in self._image_buttons:
+            self._selected_path = ""
+        self._sync_switcher()
+
+    def image_paths(self) -> list[str]:
+        """返回切换条中的图片路径顺序（供测试与外部定位）。"""
+        return [path for _seq, path, _hit in self._image_items]
+
+    def hit_image_paths(self) -> set[str]:
+        """返回**命中申报要素**的图片路径集合（切换条数据里标记为 hit 的那些）。"""
+        return {path for _seq, path, hit in self._image_items if hit}
+
+    def set_current_image(self, path: str) -> None:
+        """设置切换条上的「当前图」（只改高亮 / 五角星，**不加载图片**）。"""
+        target = str(path or "").strip()
+        self._selected_path = target
+        self._sync_switcher()
+
+    def current_image_path(self) -> str:
+        """返回切换条上的当前图路径（未设置时为空串）。"""
+        return self._selected_path
+
+    def step_image(self, delta: int) -> None:
+        """按偏移切换图片（``-1`` 上一张 / ``+1`` 下一张，越界夹紧）。"""
+        paths = self.image_paths()
+        if not paths:
+            return
+        try:
+            index = paths.index(self._selected_path)
+        except ValueError:
+            index = 0 if delta > 0 else len(paths) - 1
+        target = max(0, min(index + int(delta), len(paths) - 1))
+        self._request_image(paths[target])
+
+    def _request_image(self, path: str) -> None:
+        """请求切换到某张图：先本地高亮，再发信号由工作台统一换图。"""
+        if not path:
+            return
+        self.set_current_image(path)
+        self.image_requested.emit(path)
+
+    def _sync_switcher(self) -> None:
+        """按「当前图 + 命中集」刷新切换条：按钮四态配色、左右按钮可用性、五角星。
+
+        四态配色（需求 2）：
+          * 命中 × 选中 → **红底白字**；命中 × 未选中 → 白底红字红边；
+          * 未命中 × 选中 → **主题蓝底白字**；未命中 × 未选中 → 白底主题蓝字蓝边。
+        """
+        if not hasattr(self, "thumbs_layout"):
+            return
+        hits = self.hit_image_paths()
+        for path, btn in self._image_buttons.items():
+            active = path == self._selected_path
+            hit = path in hits
+            btn.setProperty("evidenceCurrent", bool(active))
+            btn.setProperty("evidenceHit", bool(hit))
+            btn.setStyleSheet(_switch_button_qss(hit=hit, active=active))
+
+        paths = self.image_paths()
+        index = paths.index(self._selected_path) if self._selected_path in paths else -1
+        has_prev = index > 0
+        has_next = 0 <= index < len(paths) - 1
+        if index < 0 and paths:
+            # 未选中任何图（如刚换记录）→ 默认后续可前进
+            has_prev, has_next = False, True
+        self.btn_prev_image.setEnabled(has_prev)
+        self.btn_next_image.setEnabled(has_next)
+
+        # 五角星：**仅当该图真的显示在舞台上**时才点亮（占位文案上不画星）
+        displayed = (
+            self._pixmap is not None
+            and bool(self._selected_path)
+            and self._selected_path == self._current_path
+        )
+        star = displayed and self._selected_path in hits
+        self.image_label.set_star(star)
+        self.hit_label.setText("★ 本图命中申报要素" if star else "")
+
+    def _clear_thumb_buttons(self) -> None:
+        """清空切换条上的全部图号按钮 / 占位提示。
+
+        ⚠️ **不能只调 ``deleteLater()``**：它是**异步**的（下一轮事件循环才真正析构），
+        而 ``takeAt(0)`` 只是把控件从**布局**里摘掉 —— 控件此时仍是 ``thumbs_area``
+        的**子控件**，于是**继续按旧坐标渲染**。连续多次 ``set_images()`` 时会看到
+        **上一轮的图号按钮残影**（实测：`图1 图2 图4` 换一轮后变成
+        `图1 图2 图4` ＋ 残留的 `图4 图6`）。
+
+        故必须 **``hide()`` + ``setParent(None)`` 同步解除可见性**，再交给
+        ``deleteLater()`` 回收（与 ``WorkbenchCard._clear_layout`` 同一处理）。
+        """
+        if not hasattr(self, "thumbs_layout"):
+            return
+        while self.thumbs_layout.count():
+            item = self.thumbs_layout.takeAt(0)
+            widget = item.widget() if item is not None else None
+            if widget is not None:
+                widget.hide()
+                widget.setParent(None)
+                widget.deleteLater()
+        self._image_buttons.clear()
+        self._switch_hint = None
+
 
     # ─────────────────────── 旋转（v0.3.0 需求 2）───────────────────────
 
@@ -409,7 +741,7 @@ class ImageViewer(QFrame):
         super().wheelEvent(event)
 
     def clear(self) -> None:
-        """清空并复位（含旋转角度）。"""
+        """清空并复位（含旋转角度、切换条与命中五角星）。"""
         self._pixmap = None
         self._current_path = ""
         self._scale = 1.0
@@ -417,8 +749,11 @@ class ImageViewer(QFrame):
         self._reset_rotation()
         self.image_label.setPixmap(QPixmap())
         self.image_label.setText("（未选择记录）")
+        self.image_label.set_star(False)
         self.path_label.setText("")
         self.scale_label.setText("—")
+        # v0.3.7：换记录 → 清掉上一记录的图号按钮（否则残留旧记录的按钮）
+        self.set_images([])
         self._apply_cursor()
 
     def style_hint(self) -> Palette:  # pragma: no cover - 便捷访问

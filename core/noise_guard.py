@@ -178,7 +178,14 @@ class NoiseGuard:
     # ══════════════════════════════════════════════════════════
 
     def _resolve_noise_rules(self) -> NoiseSignalRules:
-        """解析噪声信号规则（YAML 优先，constants 兜底）。"""
+        """解析噪声信号规则（YAML 优先，constants 兜底）。
+
+        ⚠️ **缺陷 F 教训（本方法为修复现场）**：兜底分支必须与 repo 路径**规则集等价**
+        —— 尤其是 ``known_noise_samples``（漏传会让「已知误读自动纠正」整条链路在
+        "YAML 缺失 / 打包漏拷"时**静默失效**，表现为"源码态全绿、打包后判定全变"）。
+        故此处**逐字段**从 :mod:`core.constants` 兜底默认值取值，并由
+        ``tests/test_noise_guard.py::TestFallbackEquivalence`` 断言与 repo 快照等价。
+        """
         if self._repo is not None:
             try:
                 snapshot = self._repo.get()
@@ -194,6 +201,16 @@ class NoiseGuard:
             fuzzy_max_edit_distance=constants.DEFAULT_FUZZY_MAX_EDIT_DISTANCE,
             fuzzy_min_length=constants.DEFAULT_FUZZY_MIN_LENGTH,
             fuzzy_verdict=constants.DEFAULT_FUZZY_VERDICT.value,
+            low_confidence_threshold=constants.DEFAULT_LOW_CONFIDENCE_THRESHOLD,
+            fragment_min_chars=constants.DEFAULT_FRAGMENT_MIN_CHARS,
+            known_noise_samples=tuple(
+                dict(sample) for sample in constants.DEFAULT_KNOWN_NOISE_SAMPLES
+            ),
+            letter_diff_min_length=constants.DEFAULT_LETTER_DIFF_MIN_LENGTH,
+            letter_diff_max_edit_distance=(
+                constants.DEFAULT_LETTER_DIFF_MAX_EDIT_DISTANCE
+            ),
+            letter_diff_verdict=constants.DEFAULT_LETTER_DIFF_VERDICT.value,
         )
 
     def _resolve_whole_rules(self) -> WholeMachineBrandRules:
@@ -244,6 +261,8 @@ class NoiseGuard:
           2. 归一化后完全相等 → ``DEFINITE_MATCH``
           3. 易混字符归一化后相等 → ``SUSPICIOUS``（SOP 陷阱#6）
           4. 编辑距离 ≤ 阈值且双方长度 ≥ 最小长度 → ``SUSPICIOUS``（13.5.2）
+          4′. 双方**纯英文**、长度均 > 3、只有字母之差（编辑距离 ≤ 上限）
+             → ``SUSPICIOUS``（⚠️ 口径 v0.3.2：列待复核，绝不直达 ❌）
           5. HTTP 低置信度 OCR（任一文本 ``low_confidence`` 或低于阈值）→ ``SUSPICIOUS``
           6. 残片（识别值过短且无字母/数字主体）→ ``SUSPICIOUS``
           7. 其余 → ``CLEAR_MISMATCH``（证据充分，允许 ❌）
@@ -390,6 +409,30 @@ class NoiseGuard:
                     f"{max_dist} 且长度均 ≥ {min_len}，疑似 OCR 噪声，转人工复核"
                 ),
                 signals=["fuzzy_similarity"],
+                is_whole_machine=whole_machine,
+            )
+
+        # ④′ 【口径 v0.3.2】英文「只差字母」→ 疑似噪声（用户裁定 2026-09-17）
+        #     申报值与识别值**均为纯英文字母**、长度**均 > 3 个字母**、且只有字母之差
+        #     （编辑距离 ≤ 上限）→ OCR 极可能只是读错了字母 → **列待复核（⚠️）**，
+        #     并由上层把逐字符差异写进「判定依据」供人工判断。
+        #
+        #     ⚠️ 为什么单列一条：通用模糊相似度（④）要求长度 ≥ 5，长度恰为 4 的
+        #        纯英文串会直接落到 ⑦「明确不一致（❌）」→ 假异常。
+        #     ⚠️ 判定**强制 SUSPICIOUS**（不虚高红线）；``letter_diff_verdict`` 仅供
+        #        ``RuleRepository.validate()`` 校验与文档说明，与 ``fuzzy_verdict`` 同处理。
+        #     ⚠️ 边界：仅对**纯英文字母**生效 —— 含数字/符号的型号不适用
+        #        （数字之差是实体差异，非字母误读）。
+        if self._is_letter_only_difference(left, right):
+            return NoiseVerdict(
+                level=NoiseLevel.SUSPICIOUS,
+                reason=(
+                    f"{label}：申报『{left}』与图片『{right}』均为英文、长度均 ≥ "
+                    f"{self._noise.letter_diff_min_length}，且仅字母之差"
+                    f"（编辑距离 {distance} ≤ {self._noise.letter_diff_max_edit_distance}），"
+                    "疑似 OCR 字母误读，转人工复核"
+                ),
+                signals=["letter_only_difference"],
                 is_whole_machine=whole_machine,
             )
 
@@ -768,6 +811,47 @@ class NoiseGuard:
             if 0.0 < confidence < threshold:
                 return True
         return False
+
+    @staticmethod
+    def _is_ascii_alpha(text: str) -> bool:
+        """文本是否为**纯 ASCII 英文字母**（不含数字 / 符号 / 中日韩字符）。
+
+        ⚠️ 不能用 ``str.isalpha()`` —— 它对中文（``isalpha() == True``）同样成立，
+        会把中文品牌误纳入「英文只差字母」规则。
+        """
+        return bool(text) and all("A" <= ch.upper() <= "Z" for ch in text)
+
+    def _is_letter_only_difference(self, left: str, right: str) -> bool:
+        """【口径 v0.3.2】是否构成「双方均为纯英文、长度均 > 3、只有字母之差」。
+
+        命中条件（**全部**满足）：
+
+          1. 双方长度均 ≥ ``letter_only_difference.min_length``（默认 4 = "> 3 个字母"）；
+          2. 双方均为**纯 ASCII 英文字母**（含数字/符号的型号不适用 —— 数字之差是
+             实体差异，不是字母误读）；
+          3. 忽略大小写后**不相等**（仅大小写不同已在上游判为一致）；
+          4. 编辑距离 ≤ ``letter_only_difference.max_edit_distance``（默认 2）。
+
+        ⚠️ 命中后由调用方强制判 ``SUSPICIOUS``（⚠️ 待复核），**绝不直达 ❌**
+        —— 不虚高红线的直接应用。
+
+        Args:
+            left: 申报值。
+            right: 图片识别值。
+
+        Returns:
+            ``True`` 表示属"只有字母之差"，应转人工复核。
+        """
+        min_len = max(1, int(self._noise.letter_diff_min_length or 4))
+        max_dist = max(0, int(self._noise.letter_diff_max_edit_distance or 2))
+
+        if len(left) < min_len or len(right) < min_len:
+            return False
+        if not (self._is_ascii_alpha(left) and self._is_ascii_alpha(right)):
+            return False
+        if left.upper() == right.upper():
+            return False
+        return edit_distance(left, right) <= max_dist
 
     def _is_fragment(self, value: str) -> bool:
         """判断识别值是否为残片（过短且无字母/数字主体）。"""
