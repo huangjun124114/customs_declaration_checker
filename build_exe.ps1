@@ -24,6 +24,10 @@ param(
     [switch]$Zip,
     [switch]$SkipEnvCheck,
     [switch]$Clean,
+    # 一线员工操作手册随包出厂（v0.3.7 起，用户裁定 2026-09-17）。
+    #   -SkipManual 显式排除手册；-ManualHtml 指定手册源文件（默认按版本号+日期自动探测）。
+    [switch]$SkipManual,
+    [string]$ManualHtml = "",
     [string]$Python = ""
 )
 
@@ -36,7 +40,17 @@ $Version = "0.3.7"
 #    v0.3.4「元素值连写」泄漏修复 / v0.3.5 品牌分词边界 / v0.3.6「判定依据」列 /
 #    v0.3.7 复核工作台四项优化 + 两处信号/残影缺陷修复 + 一线员工操作手册，
 #    均于 0917 完成）
-$ZipName = "报关申报要素校验工具_v${Version}_0917.zip"
+$BuildDate = "0917"
+$ZipName = "报关申报要素校验工具_v${Version}_${BuildDate}.zip"
+
+# ── 一线员工操作手册（v0.3.7 起**随包出厂**，用户裁定 2026-09-17）────────────
+# 手册位于项目空间 `成果产出\`（= 仓库根的上一级），命名规则 `操作手册_v<版本>_<日期>.html`。
+# ⚠️ **必须由本脚本写入 app 目录后再压缩**。v0.3.7 曾出现"手工把手册塞进 onedir、再手工压缩"
+#    的临时动作 → 脚本产出的交付名 zip 与 onedir 内容不一致（交付名那个**不含手册**），
+#    且每次打包都会复现。故此处固化为流程中**唯一的手册入口**，禁止绕开。
+# ⚠️ 路径变量必须在 $Root 赋值**之后**计算（见下方「脚本所在目录 = 工程根」），否则取到空值。
+$ManualName   = "操作手册.html"          # 入包后的固定名（不带版本，现场直观）
+$ManualFigDir = "操作手册插图"
 
 # ── 强制 UTF-8（SOP 陷阱 #5：官方打包器用 GBK 读文件）────────────────────
 $env:PYTHONUTF8 = "1"
@@ -51,6 +65,14 @@ try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 # 脚本所在目录 = 工程根
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $Root
+
+# 项目空间 = 工程根的上一级；手册源目录在此（v0.3.7 起手册随包出厂）
+$SpaceRoot = Split-Path -Parent $Root
+$ManualDir = Join-Path $SpaceRoot "成果产出"
+if ([string]::IsNullOrWhiteSpace($ManualHtml)) {
+    $ManualHtml = Join-Path $ManualDir "操作手册_v${Version}_${BuildDate}.html"
+}
+$ManualFigSrc = Join-Path $ManualDir $ManualFigDir
 
 Write-Host "==============================================================" -ForegroundColor Cyan
 Write-Host " 报关申报要素自动校验工具 · 打包脚本" -ForegroundColor Cyan
@@ -193,6 +215,39 @@ if (Test-Path $distDir) {
             exit 1
         }
         else {
+            # ── 6a. 一线员工操作手册随包出厂（v0.3.7 起，用户裁定 2026-09-17）──
+            # ⚠️ 必须在 Compress-Archive **之前**写入 app 目录，否则交付包不含手册
+            #    （这正是 v0.3.7 交付名 zip 与 onedir 不一致的根因）。
+            if ($SkipManual) {
+                Write-Host "[WARN] -SkipManual：本次**不**打包操作手册。" -ForegroundColor Yellow
+            }
+            else {
+                if (-not (Test-Path $ManualHtml)) {
+                    Write-Host "[FAIL] 未找到一线员工操作手册：$ManualHtml" -ForegroundColor Red
+                    Write-Host "       手册自 v0.3.7 起随包出厂（用户裁定）。" -ForegroundColor Red
+                    Write-Host "       请先生成手册，或显式加 -SkipManual 排除。" -ForegroundColor Red
+                    exit 1
+                }
+                $manualDst = Join-Path $appDir $ManualName
+                Copy-Item -Force $ManualHtml $manualDst
+                $manualKB = [math]::Round((Get-Item $manualDst).Length / 1KB, 1)
+                Write-Host ("       手册入包：{0}  ({1} KB)" -f $ManualName, $manualKB) -ForegroundColor Green
+
+                if (Test-Path $ManualFigSrc) {
+                    $figDst = Join-Path $appDir $ManualFigDir
+                    if (Test-Path $figDst) {
+                        Remove-Item -Recurse -Force $figDst -ErrorAction SilentlyContinue
+                    }
+                    New-Item -ItemType Directory -Force -Path $figDst | Out-Null
+                    Copy-Item -Force (Join-Path $ManualFigSrc "*") $figDst
+                    $figCount = @(Get-ChildItem -File $figDst).Count
+                    Write-Host ("       插图入包：{0}\  ({1} 个文件)" -f $ManualFigDir, $figCount) -ForegroundColor Green
+                }
+                else {
+                    Write-Host "[WARN] 未找到手册插图目录：$ManualFigSrc（手册仍已入包）" -ForegroundColor Yellow
+                }
+            }
+
             if (Test-Path $zipPath) {
                 Remove-Item -Force $zipPath -ErrorAction SilentlyContinue
             }
@@ -200,7 +255,8 @@ if (Test-Path $distDir) {
             if (Test-Path $zipPath) {
                 $zipMB = [math]::Round((Get-Item $zipPath).Length / 1MB, 1)
                 Write-Host ("[OK]   分发包：{0}  ({1} MB)" -f $zipPath, $zipMB) -ForegroundColor Green
-                Write-Host "       交付物 = 该 zip（解压后双击「报关申报要素校验工具.exe」运行）。" -ForegroundColor Green
+                Write-Host "       交付物 = 该 zip（解压出「报关申报要素校验工具」文件夹，双击其中的 exe 运行）。" -ForegroundColor Green
+                Write-Host "       包内附一线员工操作手册：操作手册.html + 操作手册插图\（v0.3.7 起）。" -ForegroundColor Green
             } else {
                 Write-Host "[FAIL] zip 生成失败。" -ForegroundColor Red
                 exit 1
